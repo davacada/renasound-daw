@@ -6,6 +6,50 @@ A Mixcraft-style music DAW for **macOS and Windows**, written in C++ with JUCE.
 
 ![RENASOUND](docs/screenshot.png)
 
+## What's new in 0.11
+
+- **RENASYNTH**, RENASOUND's own synth, on every instrument track: two oscillators (sine, triangle, saw, square, noise, each with a shape control), sub and noise, up to 7 unison voices with detune and stereo width, glide, a resonant filter (24 / 12 dB low-pass, high-pass, band-pass) with drive, key tracking and its own envelope, an amp envelope, and an LFO for pitch, filter, volume, shape or pan. Twelve starting sounds. Its panel draws everything live: the waveforms, the voices fanning out, the filter curve moving with the envelope, the envelopes (drag their points), the LFO and the output. Older projects keep their sound.
+- **Click the instrument name** on a track to open its panel; the arrow picks another instrument.
+- **Count-in** next to the metronome: 1 to 4 clicks, 1 bar or 2 bars before recording starts.
+- **Mix down window:** song, artist, album, writers, producers and a cover picture (embedded in WAV, AIFF and FLAC); WAV, AIFF, FLAC or Ogg Vorbis; 16 / 24 / 32-bit float or 128 to 320 kbps; 44.1 to 96 kHz; a stereo mix or **stems** (a file per track, optionally with the full mix).
+
+## What's new in 0.10.2
+
+- Mac: the Update button's installer is sturdier (handles macOS running the app from a temporary copy, copies before swapping, opens the installer window if it can't replace the app) and logs to ~/Library/Logs/RENASOUND Update.log.
+
+## What's new in 0.10.1
+
+- **.renasound project files have their own icon** on Mac and Windows, and double-clicking one opens it in RENASOUND.
+- The Update button shows the version you're running.
+
+## What's new in 0.10: the timeline
+
+- **Select clips** by clicking, Shift/Cmd-click to add, or drag a box on an empty part of the lanes (mouse or trackpad). The box also highlights that stretch of time.
+- **Grab and move** every selected clip together, along the timeline or onto other tracks.
+- **Trim from both sides:** drag either edge. Trimmed MIDI notes come back if you drag the edge out again.
+- **Cut, copy, paste, duplicate, split, join into one clip, reverse, lock, rename** from the right-click menu or the keyboard (Cmd+X / C / V / D / J / R / L, S to split, arrows to nudge, Esc to deselect).
+- **Snap** button and grid size next to the piano button; hold Alt to place freely.
+- **L** loops the highlighted area (or the selected clips).
+- **Recording shows as it happens:** MIDI notes and audio waveforms draw while you record.
+- **Instrument tracks are named after their instrument** until you rename them.
+- **Editors:** a ruler to move the playhead, and a play button that plays just that clip.
+
+## What's new in 0.9.2
+
+- The **Update** button now downloads from the public [renasound-releases](https://github.com/davacada/renasound-releases) repo, so it works while this code stays private. Install 0.9.2 by hand once; after that, Update does it for you.
+
+## What's new in 0.9
+
+- **New faceplates for the built-in effects**, each with its own look and live graphics:
+  - **Compressor:** a VU needle for gain reduction, the dynamics curve with the live level riding on it, and gain reduction over time.
+  - **Reverb:** a 3D room shaped by Size and Width, with walls that soften with Damping and wavefronts that start after the pre-delay.
+  - **Delay:** every echo as a bar in time, left and right for ping-pong, getting duller with Tone.
+  - **EQ:** draggable band points on the curve. **Tube EQ:** enamel panel, a glowing tube and a small curve screen.
+  - **Noise Gate:** level against the threshold with an open / closed light. **Gater:** the step pattern with a playhead. **Phaser:** sweeping notches. **Chorus:** drifting voices.
+- **Presets on every device** (built-in effects and instruments, and plugins): a preset bar with Save, Delete, Default and previous / next. Presets live in Music/RENASOUND/Presets.
+- **Musical typing:** the piano button next to BPM lets the computer keyboard play the selected instrument (A to ; white keys, W E T Y U O P black keys, Z / X octave, C / V velocity).
+- **An input on each channel:** audio tracks record from any input or stereo pair of your interface, and several armed tracks record at once; instrument tracks can listen to all MIDI or to one controller.
+
 ## What's new in 0.8
 
 **Look:** "black sandstone": warm near-black with a fine stone grain, sand accents, and borderless buttons that only light up on hover or when switched on.
