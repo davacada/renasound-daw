@@ -13,7 +13,9 @@
 namespace rs
 {
 
-class DrumMachine : public juce::AudioProcessor
+class DrumMachine : public juce::AudioProcessor,
+                    private juce::AudioProcessorValueTreeState::Listener,
+                    private juce::Timer
 {
 public:
     static constexpr int numPads = 16;
@@ -43,6 +45,14 @@ public:
     void triggerPad (int pad, float velocity);         // from the UI (audition)
     double getLastHitTime (int pad) const { return lastHit[(size_t) pad].load(); }
     juce::String getKitLabel() const;
+
+    // ---- sound shaping ----
+    // Every pad: Decay, Tone, Attack, Drive (applied as it plays, so they work on samples too).
+    // Synthesised pads also have two "character" controls that rebuild the sound (see getCharacterNames).
+    static juce::StringArray getCharacterNames (int pad);
+    bool padIsSynthesised (int pad) const { return ! padHasCustomSample (pad); }
+    std::vector<float> getPadPeaks (int pad, int columns) const;   // waveform outline, 0..1, for the editor
+    double getPadSeconds (int pad) const;
 
     juce::AudioProcessorValueTreeState state;
 
@@ -93,6 +103,11 @@ private:
         float gainL = 0, gainR = 0;
         float fade = 1.0f, fadeStep = 0.0f;   // fadeStep < 0 while being cut off
         bool active = false;
+        // shaping
+        int age = 0, fadeIn = 0, hold = 0;
+        float env = 1.0f, envCoef = 1.0f, boost = 0.0f, boostCoef = 0.0f;
+        float lpA = 1.0f, hpA = 0.0f, toneGain = 1.0f, drive = 1.0f, driveNorm = 1.0f;
+        float lp1[2] {}, lp2[2] {}, hpIn[2] {}, hpOut[2] {};
     };
 
     std::array<Pad, numPads> pads;
@@ -106,6 +121,10 @@ private:
     juce::int64 samplePosition = 0;
 
     void startVoice (int pad, float velocity);
+    void parameterChanged (const juce::String& id, float) override;
+    void timerCallback() override;
+    void resynthesise (int pad);
+    std::array<std::atomic<bool>, numPads> needsResynth;
     static SamplePtr loadSampleFile (const juce::File&);
 };
 

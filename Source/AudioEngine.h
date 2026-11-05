@@ -109,6 +109,7 @@ private:
     int metronomeSamplesLeft = 0;
     bool metronomeAccent = false;
 
+    void processMaster (juce::AudioBuffer<float>& mix, double startSeconds, int numSamples);   // master automation, effects, volume
     void renderBlock (juce::AudioBuffer<float>& out, double startSeconds, int numSamples, bool transportRunning,
                       const juce::MidiBuffer& live, int liveOffset, bool includeLive);
     void renderTrack (Track&, double startSec, int numSamples, bool transportRunning,

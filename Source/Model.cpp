@@ -107,7 +107,15 @@ juce::AudioProcessorParameter* Track::getAutomationParameter (const AutomationLa
 
 Track::Track() = default;
 
-Project::Project (AudioCache& c) : audioCache (c) {}
+Project::Project (AudioCache& c) : audioCache (c)
+{
+    master = std::make_shared<Track>();
+    master->isMaster = true;
+    master->id = -100;   // never a real track id (and -1 means "no selection")
+    master->name = "Master";
+    master->colour = juce::Colour (0xffd8a96e);
+    master->externalFx = &masterFx;
+}
 
 TrackPtr Project::addTrack (Track::Type type)
 {
@@ -255,6 +263,7 @@ ClipPtr Project::splitClip (int clipId, double atBeat)
 
 TrackPtr Project::findTrack (int trackId) const
 {
+    if (trackId == master->id) return master;
     for (auto& t : tracks)
         if (t->id == trackId) return t;
     return nullptr;
@@ -404,8 +413,21 @@ std::unique_ptr<juce::XmlElement> Project::toXml() const
             }
         }
     }
-    auto* master = root->createNewChildElement ("MASTERFX");
-    for (auto& f : masterFx) fxToXml (*f, *master, "FX");
+    auto* masterXml = root->createNewChildElement ("MASTERFX");
+    masterXml->setAttribute ("shown", showMaster);
+    for (auto& f : masterFx) fxToXml (*f, *masterXml, "FX");
+    for (auto& lane : master->automation)
+    {
+        auto* ae = masterXml->createNewChildElement ("AUTOMATION");
+        ae->setAttribute ("param", lane.getId());
+        ae->setAttribute ("visible", lane.visible);
+        for (auto& pt : lane.points)
+        {
+            auto* pe = ae->createNewChildElement ("P");
+            pe->setAttribute ("b", pt.beat);
+            pe->setAttribute ("v", pt.value);
+        }
+    }
     return root;
 }
 
@@ -624,8 +646,20 @@ void Project::fromXml (const juce::XmlElement& root)
     }
 
     std::vector<FxPtr> newMaster;
+    std::vector<AutomationLane> newMasterLanes;
+    bool newShowMaster = false;
     if (auto* me = root.getChildByName ("MASTERFX"))
     {
+        newShowMaster = me->getBoolAttribute ("shown", false);
+        for (auto* ae : me->getChildWithTagNameIterator ("AUTOMATION"))
+        {
+            auto lane = AutomationLane::fromId (ae->getStringAttribute ("param", "volume"));
+            lane.visible = ae->getBoolAttribute ("visible", true);
+            for (auto* pe : ae->getChildWithTagNameIterator ("P"))
+                lane.points.push_back ({ pe->getDoubleAttribute ("b"), (float) juce::jlimit (0.0, 1.0, pe->getDoubleAttribute ("v", 0.5)) });
+            std::sort (lane.points.begin(), lane.points.end(), [] (auto& a, auto& b) { return a.beat < b.beat; });
+            newMasterLanes.push_back (lane);
+        }
         int i = 0;
         for (auto* fe : me->getChildWithTagNameIterator ("FX"))
         {
@@ -644,6 +678,8 @@ void Project::fromXml (const juce::XmlElement& root)
         masterVolume = (float) root.getDoubleAttribute ("masterVolume", 0.9);
         tracks = std::move (newTracks);
         masterFx = std::move (newMaster);
+        master->automation = std::move (newMasterLanes);
+        showMaster = newShowMaster;
         nextId = id;
     }
     changed();
@@ -686,6 +722,8 @@ void Project::clear()
         const juce::ScopedLock sl (lock);
         tracks.clear();
         masterFx.clear();
+        master->automation.clear();
+        showMaster = false;
         bpm = 120;
         loopEnabled = false;
         loopStart = 0; loopEnd = 16;

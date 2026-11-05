@@ -21,6 +21,11 @@ public:
     void resized() override;
     void paint (juce::Graphics&) override;
     void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
+    void mouseMagnify (const juce::MouseEvent&, float scaleFactor) override;   // trackpad pinch
+
+    // the "+ Audio" / "+ Instrument" buttons above the track headers
+    juce::TextButton addAudioButton { "+ Audio" }, addInstrumentButton { "+ Instrument" },
+                     addVocoderButton { "+ Vocoder" }, addSamplerButton { "+ Sampler" }, addMasterButton { "+ Master" };
 
     void rebuild();
     void zoom (float factor, int aroundX = -1);
@@ -35,7 +40,10 @@ public:
 
     float beatToX (double beat) const      { return (float) (beat * pixelsPerBeat - scrollX); }   // inside lanes area
     double xToBeat (float x) const         { return (x + scrollX) / pixelsPerBeat; }
-    // rows: each track's clip row, followed by its visible automation lanes
+    // rows: every track, then the master track when it's shown (Project::showMaster)
+    int numRows() const;
+    TrackPtr rowTrack (int row) const;
+    // each row: the track's clip row, followed by its visible automation lanes
     int trackTop (int trackIndex) const;            // in content pixels (before scrolling)
     int trackFullHeight (int trackIndex) const;
     int contentHeight() const;

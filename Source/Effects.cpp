@@ -619,6 +619,7 @@ std::unique_ptr<BuiltinFx> createBuiltinFx (const juce::String& id)
     if (id == "amp")        return createAmp();
     if (id == "kick")       return createKickSynth();
     if (id == "vocoder")    return createVocoder();
+    if (id == "sampler")    return createSampler();
     if (id == "compressor") return std::make_unique<CompressorFx>();
     if (id == "reverb")     return std::make_unique<ReverbFx>();
     if (id == "delay")      return std::make_unique<DelayFx>();

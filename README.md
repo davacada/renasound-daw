@@ -6,6 +6,26 @@ A Mixcraft-style music DAW for **macOS and Windows**, written in C++ with JUCE.
 
 ![RENASOUND](docs/screenshot.png)
 
+## What's new in 0.8
+
+**Look:** "black sandstone": warm near-black with a fine stone grain, sand accents, and borderless buttons that only light up on hover or when switched on.
+
+**Update button** (next to Audio setup): checks GitHub for a newer build at start-up; one click downloads it, installs it and restarts RENASOUND.
+
+**Arrangement**
+- **+ Audio, + Instrument, + Vocoder, + Sampler, + Master** above the tracks. + Vocoder adds a Vocoder track already listening to your vocal track; + Sampler adds a Sampler track ready to play; + Master shows the master track for master volume and master-effect automation.
+- Every track has an **automation** icon between S and R.
+- Click the **clock** to switch between bars.beats.16ths and minutes:seconds (the ruler follows).
+- **Trackpad gestures** like Adobe's apps: pinch to zoom, two-finger swipe to scroll, Option/Cmd + scroll to zoom (add Shift in the editors for note height) - in the timeline, piano roll and pitch editor.
+
+**Piano roll**
+- Tools: **Select** (V: click / box-select, move, resize), **Edit** (E: drag up/down for velocity, edges for length), **Draw** (D: click to write, drag for length).
+- **Right-click menu**: cut, copy, paste here, duplicate, delete, select all / none, quantize, transpose, velocity (set, softer, louder, humanize), length (double, halve, grid, legato), tool and grid. Keys: Cmd+A/C/X/V/D, Delete, arrows (Shift = octave).
+
+**Sampler** (new instrument): drop any sound (file or Library) and play it across the keyboard. Keys / One-shot / Drum modes, 16 voices, draggable start/end, loop, ADSR, filter, velocity; starts with a built-in "Glass Keys" sound.
+
+**RENASOUND Drums, redesigned and shapeable**: glowing pads coloured by family with waveform thumbnails, a screen that draws the selected pad's sound and shape. Every pad: Level, Tune, Pan, **Decay, Tone, Attack, Drive** (also on your own samples). Synthesised kits add **character** controls that rebuild the sound: Sweep / Click (kick, toms), Snappy / Body (snares), Snappy / Spread (clap), Ring / Metal (hats, cymbals).
+
 ## What's new in 0.7.1
 
 - **Instrument picker on every instrument track**: the instrument's name sits under the track name; click it to choose a RENASOUND synth sound, a drum kit (including your own kits), Kick Synth, Vocoder or a plugin, or to open the instrument's window. **+ Instrument** asks which instrument the new track should play.

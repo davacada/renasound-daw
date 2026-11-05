@@ -628,18 +628,31 @@ void PitchEditor::scrollBarMoved (juce::ScrollBar* b, double start)
     repaint();
 }
 
+void PitchEditor::mouseMagnify (const juce::MouseEvent& e, float scaleFactor)
+{
+    zoomAround (scaleFactor, (float) e.getEventRelativeTo (notesView.get()).x);
+}
+
+void PitchEditor::zoomAround (double factor, float mx)
+{
+    const double secAt = xToSec (mx);
+    pxPerSec = juce::jlimit (10.0, 2000.0, pxPerSec * factor);
+    scrollX = juce::jmax (0.0, (secAt - viewStartSec()) * pxPerSec - mx);
+    updateScrollBars();
+    repaint();
+}
+
 void PitchEditor::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& w)
 {
-    if (e.mods.isCommandDown() || e.mods.isCtrlDown())
+    const float d = std::abs (w.deltaY) > std::abs (w.deltaX) ? w.deltaY : w.deltaX;
+    if ((e.mods.isCommandDown() || e.mods.isCtrlDown() || e.mods.isAltDown()) && e.mods.isShiftDown())
     {
-        const float mx = (float) e.getEventRelativeTo (notesView.get()).x;
-        const double secAt = xToSec (mx);
-        pxPerSec = juce::jlimit (10.0, 2000.0, pxPerSec * (w.deltaY > 0 ? 1.15 : 1.0 / 1.15));
-        scrollX = juce::jmax (0.0, (secAt - viewStartSec()) * pxPerSec - mx);
+        noteH = juce::jlimit (8, 32, noteH + (d > 0 ? 2 : -2));
     }
-    else if (e.mods.isAltDown())
+    else if (e.mods.isCommandDown() || e.mods.isCtrlDown() || e.mods.isAltDown())
     {
-        noteH = juce::jlimit (8, 32, noteH + (w.deltaY > 0 ? 2 : -2));
+        zoomAround (std::exp (juce::jlimit (-0.5f, 0.5f, d * (w.isSmooth ? 2.0f : 1.2f))), (float) e.getEventRelativeTo (notesView.get()).x);
+        return;
     }
     else
     {

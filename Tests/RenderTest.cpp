@@ -55,6 +55,50 @@ int main (int argc, char** argv)
     // RenderTest --mixcraft project.mx9 out.wav : import a Mixcraft project and render it
 
 
+
+    if (argc >= 2 && juce::String (argv[1]) == "--drumshape")
+    {
+        const double sr = 48000.0;
+        auto db = [] (float v) { return juce::Decibels::gainToDecibels (v, -150.0f); };
+        auto hit = [sr] (rs::DrumMachine& d, std::function<void (rs::DrumMachine&)> set)
+        {
+            if (set) set (d);
+            d.setPlayConfigDetails (0, 2, sr, 512);
+            d.prepareToPlay (sr, 512);
+            juce::AudioBuffer<float> out (2, (int) sr);
+            out.clear();
+            for (int pos = 0; pos < out.getNumSamples(); pos += 512)
+            {
+                juce::AudioBuffer<float> view (out.getArrayOfWritePointers(), 2, pos, juce::jmin (512, out.getNumSamples() - pos));
+                juce::MidiBuffer m;
+                if (pos == 0) m.addEvent (juce::MidiMessage::noteOn (10, 36, (juce::uint8) 120), 0);
+                d.processBlock (view, m);
+            }
+            return out;
+        };
+        auto set = [] (rs::DrumMachine& d, const juce::String& id, float v) { auto* p = d.state.getParameter (id); p->setValueNotifyingHost (p->convertTo0to1 (v)); };
+        auto report = [&] (const char* name, juce::AudioBuffer<float>& b)
+        {
+            // length to -40 dB, brightness (zero crossings in the first 30 ms), early vs body level
+            const float pk = b.getMagnitude (0, 0, b.getNumSamples());
+            int last = 0; for (int i = 0; i < b.getNumSamples(); ++i) if (std::abs (b.getSample (0, i)) > pk * 0.01f) last = i;
+            int zc = 0; for (int i = 1; i < (int) (0.03 * sr); ++i) if ((b.getSample (0, i - 1) < 0) != (b.getSample (0, i) < 0)) ++zc;
+            std::cout << "  " << juce::String (name).paddedRight (' ', 26) << " peak " << juce::String (db (pk), 1) << " dB, length " << juce::String (last / sr * 1000.0, 0)
+                      << " ms, first 5 ms " << juce::String (db (b.getMagnitude (0, 0, 240)), 1) << " dB, 30-80 ms " << juce::String (db (b.getMagnitude (0, 1440, 2400)), 1)
+                      << " dB, zero crossings/30ms " << zc << "\n";
+        };
+        std::cout << "808 kick:\n";
+        { rs::DrumMachine d; auto b = hit (d, {}); report ("neutral", b); }
+        { rs::DrumMachine d; auto b = hit (d, [&] (rs::DrumMachine& x) { set (x, "dec0", 25); }); report ("decay 25%", b); }
+        { rs::DrumMachine d; auto b = hit (d, [&] (rs::DrumMachine& x) { set (x, "tone0", -70); }); report ("tone -70 (darker)", b); }
+        { rs::DrumMachine d; auto b = hit (d, [&] (rs::DrumMachine& x) { set (x, "tone0", 70); }); report ("tone +70 (brighter)", b); }
+        { rs::DrumMachine d; auto b = hit (d, [&] (rs::DrumMachine& x) { set (x, "att0", -80); }); report ("attack -80 (soft)", b); }
+        { rs::DrumMachine d; auto b = hit (d, [&] (rs::DrumMachine& x) { set (x, "att0", 80); }); report ("attack +80 (sharp)", b); }
+        { rs::DrumMachine d; auto b = hit (d, [&] (rs::DrumMachine& x) { set (x, "drive0", 80); }); report ("drive 80", b); }
+        { rs::DrumMachine d; auto b = hit (d, [&] (rs::DrumMachine& x) { set (x, "c10", 95); juce::MemoryBlock mb; x.getStateInformation (mb); x.setStateInformation (mb.getData(), (int) mb.getSize()); }); report ("sweep 95 (resynth)", b); }
+        { rs::DrumMachine d; auto b = hit (d, [&] (rs::DrumMachine& x) { set (x, "c20", 100); juce::MemoryBlock mb; x.getStateInformation (mb); x.setStateInformation (mb.getData(), (int) mb.getSize()); }); report ("click 100 (resynth)", b); }
+        return 0;
+    }
     if (argc >= 2 && juce::String (argv[1]) == "--devices")
     {
         const double sr = 48000.0;
@@ -189,6 +233,45 @@ int main (int argc, char** argv)
                 (pass == 0 ? voicedRms : silentRms) = out.getRMSLevel (0, total / 2, total / 2);
             }
             std::cout << "vocoder: chord + voice " << db (voicedRms * 1.414f) << " dB, chord + silence " << db (silentRms * 1.414f) << " dB\n";
+        }
+        {
+            // sampler: the built-in sound is C4; C5 should sound an octave up
+            auto smp = rs::createBuiltinFx ("sampler");
+            prep (*smp);
+            juce::AudioBuffer<float> o (2, (int) sr);
+            o.clear();
+            juce::MidiBuffer m; m.addEvent (juce::MidiMessage::noteOn (1, 72, (juce::uint8) 110), 0);
+            m.addEvent (juce::MidiMessage::noteOff (1, 72), (int) (sr * 0.5));
+            process (*smp, o, &m);
+            int zc = 0; for (int i = (int) (0.1 * sr); i < (int) (0.3 * sr); ++i) if ((o.getSample (0, i - 1) < 0) != (o.getSample (0, i) < 0)) ++zc;
+            std::cout << "sampler: C5 pitch ~" << zc / 2.0 / 0.2 << " Hz (expect 523), peak " << db (o.getMagnitude (0, 0, (int) sr))
+                      << " dB, after release " << db (o.getMagnitude (0, (int) (0.95 * sr), 2400)) << " dB\n";
+        }
+        if (argc >= 3)
+        {
+            // master track automation: volume fades to silence over the song
+            rs::AudioCache cache;
+            rs::Project project (cache);
+            rs::AudioEngine engine (project);
+            project.load (juce::File (argv[2]));
+            project.showMaster = true;
+            rs::AutomationLane lane = rs::AutomationLane::fromId ("volume");
+            lane.points = { { 0.0, rs::AutomationLane::volumeToValue (0.9f) }, { 8.0, 0.0f }, { 16.0, 0.0f } };
+            project.master->automation.push_back (lane);
+            auto f = juce::File (argv[2]).getSiblingFile ("master-auto.wav");
+            juce::String err;
+            engine.renderToFile (f, err);
+            std::unique_ptr<juce::AudioFormatReader> rd (cache.formats.createReaderFor (f));
+            juce::AudioBuffer<float> b (2, (int) rd->lengthInSamples);
+            rd->read (&b, 0, b.getNumSamples(), 0, true, true);
+            const int spb = (int) (rd->sampleRate * 60.0 / project.bpm);
+            std::cout << "master automation: rms beats 0-1 " << db (b.getRMSLevel (0, 0, spb)) << " dB, beats 4-5 " << db (b.getRMSLevel (0, 4 * spb, spb))
+                      << " dB, beats 9-10 " << db (b.getRMSLevel (0, 9 * spb, spb)) << " dB\n";
+            auto saved = juce::File (argv[2]).getSiblingFile ("master-test.renasound");
+            project.save (saved);
+            rs::Project p2 (cache);
+            p2.load (saved);
+            std::cout << "master reload: shown " << p2.showMaster << ", lanes " << p2.master->automation.size() << "\n";
         }
         if (argc >= 3)
         {

@@ -65,13 +65,6 @@ public:
         const bool addHover = hoverRow == (int) chain.size();
         g.setColour (addHover ? theme::accent.withAlpha (0.18f) : juce::Colours::transparentBlack);
         g.fillRoundedRectangle (add, 4.0f);
-        juce::Path dash;
-        dash.addRoundedRectangle (add.reduced (0.5f), 4.0f);
-        juce::Path dashed;
-        const float lengths[] = { 3.0f, 3.0f };
-        juce::PathStrokeType (1.0f).createDashedStroke (dashed, dash, lengths, 2);
-        g.setColour (addHover ? theme::accent : theme::gridBar);
-        g.fillPath (dashed);
         g.setColour (addHover ? theme::accent : theme::textDim);
         g.setFont (theme::font (juce::jmin (12.0f, rowH * 0.55f), true));
         g.drawText (chain.empty() ? "+ Add effect" : "+", add, juce::Justification::centred);

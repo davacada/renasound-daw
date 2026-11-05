@@ -30,6 +30,34 @@ public:
                                                           : (owner.pixelsPerBeat * bpb < 70 ? 2 : 1);
         g.setFont (theme::font (11.5f, true));
 
+        if (owner.ctx.showTime)
+        {
+            // minutes:seconds, labels at least ~70 px apart
+            const double secPerBeat = 60.0 / p.bpm;
+            const double pxPerSec = owner.pixelsPerBeat / secPerBeat;
+            double step = 1.0;
+            for (double cand : { 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0 })
+                if (cand * pxPerSec >= 70.0) { step = cand; break; } else step = cand;
+            const double t0 = juce::jmax (0.0, std::floor (owner.xToBeat (0) * secPerBeat / step) * step);
+            const double t1 = owner.xToBeat ((float) getWidth()) * secPerBeat + step;
+            for (double t = t0; t <= t1; t += step)
+            {
+                const float x = owner.beatToX (t / secPerBeat);
+                g.setColour (theme::gridBar);
+                g.drawVerticalLine ((int) x, 12.0f, (float) getHeight());
+                g.setColour (theme::textDim);
+                const int whole = (int) t;
+                const auto label = juce::String (whole / 60) + ":" + juce::String (whole % 60).paddedLeft ('0', 2)
+                                 + (step < 1.0 ? "." + juce::String ((int) std::round ((t - whole) * 10.0)) : juce::String());
+                g.drawText (label, (int) x + 4, 11, 60, 16, juce::Justification::centredLeft);
+                for (int k = 1; k < 4 && pxPerSec * step > 40; ++k)
+                {
+                    g.setColour (theme::grid);
+                    g.drawVerticalLine ((int) owner.beatToX ((t + step * k / 4.0) / secPerBeat), (float) getHeight() - 7, (float) getHeight());
+                }
+            }
+        }
+        else
         for (double b = juce::jmax (0.0, firstBeat); b <= lastBeat; b += 1.0)
         {
             const float x = owner.beatToX (b);
@@ -116,7 +144,8 @@ struct AutomationTarget { juce::String id, label; };
 
 static std::vector<AutomationTarget> automationTargets (const Track& t)
 {
-    std::vector<AutomationTarget> out { { "volume", "Volume" }, { "pan", "Pan" } };
+    std::vector<AutomationTarget> out { { "volume", "Volume" } };
+    if (! t.isMaster) out.push_back ({ "pan", "Pan" });
     auto addProcessor = [&out] (juce::AudioProcessor* proc, const juce::String& prefix, const juce::String& owner)
     {
         if (proc == nullptr) return;
@@ -126,7 +155,7 @@ static std::vector<AutomationTarget> automationTargets (const Track& t)
                 out.push_back ({ prefix + juce::String (i), owner + ": " + params[i]->getName (40) });
     };
     if (t.instrument != nullptr) addProcessor (t.instrument->processor.get(), "inst:", t.instrument->getName());
-    for (auto& f : t.fx) addProcessor (f->processor.get(), "fx:" + juce::String (f->uid) + ":", f->getName());
+    for (auto& f : t.effects()) addProcessor (f->processor.get(), "fx:" + juce::String (f->uid) + ":", f->getName());
     return out;
 }
 
@@ -296,7 +325,7 @@ public:
 
         for (auto* b : { &mute, &solo, &arm })
         {
-            addAndMakeVisible (b);
+            if (! track->isMaster) addAndMakeVisible (b);
             b->setClickingTogglesState (true);
         }
         mute.setColour (juce::TextButton::buttonOnColourId, juce::Colour (0xffffb020));
@@ -314,7 +343,8 @@ public:
         }
 
         addAndMakeVisible (autoButton);
-        autoButton.setTooltip ("Automation: show or hide this track's lanes (right-click to add a lane)");
+        autoButton.setTooltip ("Automation: add a lane, or show / hide this track's lanes (right-click to add another)");
+        autoButton.setName ("Automation");
         autoButton.onClick = [this]
         {
             if (juce::ModifierKeys::currentModifiers.isPopupMenu()) return;
@@ -341,10 +371,15 @@ public:
         volume.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
         volume.setRange (0.0, 1.5);
         volume.setDoubleClickReturnValue (true, 0.8);
-        volume.onValueChange = [this] { const juce::ScopedLock sl (owner.ctx.project.lock); track->volume = (float) volume.getValue(); };
+        volume.onValueChange = [this]
+        {
+            const juce::ScopedLock sl (owner.ctx.project.lock);
+            if (track->isMaster) owner.ctx.project.masterVolume = (float) volume.getValue();
+            else track->volume = (float) volume.getValue();
+        };
         volume.setTooltip ("Volume");
 
-        addAndMakeVisible (pan);
+        if (! track->isMaster) addAndMakeVisible (pan);
         pan.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
         pan.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
         pan.setRange (-1.0, 1.0);
@@ -369,7 +404,7 @@ public:
         // when automation is driving them, the controls follow it
         const float av = track->autoVolume.load(), ap = track->autoPan.load();
         if (! volume.isMouseButtonDown())
-            volume.setValue (av >= 0 ? av : track->volume, juce::dontSendNotification);
+            volume.setValue (av >= 0 ? av : track->isMaster ? owner.ctx.project.masterVolume : track->volume, juce::dontSendNotification);
         if (! pan.isMouseButtonDown())
             pan.setValue (ap >= -1.0f ? ap : track->pan, juce::dontSendNotification);
         if (track->type == Track::Type::Instrument)
@@ -378,7 +413,9 @@ public:
             if (name != instrumentPicker.text) { instrumentPicker.text = name; instrumentPicker.repaint(); }
         }
         const bool hasLanes = ! track->automation.empty();
-        autoButton.setColour (juce::TextButton::buttonColourId, hasLanes ? theme::accent.withAlpha (0.35f) : theme::panelHi);
+        bool anyOpen = false;
+        for (auto& l : track->automation) anyOpen = anyOpen || l.visible;
+        if (autoButton.hasLanes != hasLanes || autoButton.open != anyOpen) { autoButton.hasLanes = hasLanes; autoButton.open = anyOpen; autoButton.repaint(); }
         for (auto* lh : laneHeaders) lh->repaint();
     }
 
@@ -394,10 +431,18 @@ public:
         inserts.setSize (fxArea.getWidth() - (inserts.getIdealHeight() > fxArea.getHeight() ? 6 : 0), inserts.getIdealHeight());
 
         auto r = mainArea.reduced (10, 8).withTrimmedLeft (6);
-        autoButton.setBounds (r.getRight() - 24, r.getY(), 24, 18);
         r.removeFromTop (22);
         auto row = r.removeFromTop (22);
-        arm.setBounds (row.removeFromRight (24));  row.removeFromRight (3);
+        if (track->isMaster)
+        {
+            autoButton.setBounds (row.removeFromRight (24));
+            row.removeFromRight (6);
+        }
+        else
+        {
+            arm.setBounds (row.removeFromRight (24));        row.removeFromRight (3);
+            autoButton.setBounds (row.removeFromRight (24)); row.removeFromRight (3);   // between S and R
+        }
         solo.setBounds (row.removeFromRight (24)); row.removeFromRight (3);
         mute.setBounds (row.removeFromRight (24)); row.removeFromRight (4);
         pan.setBounds (row.removeFromRight (26).expanded (0, 2)); row.removeFromRight (2);
@@ -420,7 +465,7 @@ public:
         g.drawVerticalLine (getWidth() - fxColumnWidth, 6.0f, (float) trackHeight - 6.0f);
 
         auto r = mainArea.withTrimmedRight (fxColumnWidth).reduced (10, 8).withTrimmedLeft (6);
-        auto top = r.removeFromTop (20).withTrimmedRight (28);
+        auto top = r.removeFromTop (20).withTrimmedRight (4);
 
         // type icon
         auto icon = top.removeFromLeft (16).toFloat().withSizeKeepingCentre (14, 12);
@@ -465,6 +510,17 @@ public:
             if (e.mods.isPopupMenu()) showAddLaneMenu (owner.ctx, track, &autoButton);
             return;
         }
+        if (track->isMaster)
+        {
+            if (! e.mods.isPopupMenu()) return;
+            juce::PopupMenu menu;
+            menu.addItem ("Add automation lane...", [this] { showAddLaneMenu (owner.ctx, track, &autoButton); });
+            menu.addItem ("Add master effect...", [this] { devicemenus::showAddEffectMenu (owner.ctx, -1, &insertView); });
+            menu.addSeparator();
+            menu.addItem ("Hide master track", [&o = owner] { o.ctx.project.beginEdit(); o.ctx.project.showMaster = false; o.ctx.project.changed(); });
+            menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this));
+            return;
+        }
         owner.ctx.selectTrack (track->id);
         if (e.mods.isPopupMenu())
         {
@@ -488,12 +544,40 @@ public:
 
     void mouseDoubleClick (const juce::MouseEvent&) override
     {
-        if (owner.ctx.renameTrack) owner.ctx.renameTrack (track->id);
+        if (! track->isMaster && owner.ctx.renameTrack) owner.ctx.renameTrack (track->id);
     }
 
     TimelineView& owner;
     TrackPtr track;
-    juce::TextButton mute { "M" }, solo { "S" }, arm { "R" }, autoButton { "A" };
+    juce::TextButton mute { "M" }, solo { "S" }, arm { "R" };
+
+    // "Automation" with a little envelope curve; lit when the track has lanes
+    struct AutoButton : juce::Button
+    {
+        AutoButton() : juce::Button ("Automation") {}
+        bool hasLanes = false, open = false;
+        void paintButton (juce::Graphics& g, bool over, bool down) override
+        {
+            auto r = getLocalBounds().toFloat().reduced (0.5f);
+            if (open || over || down)
+            {
+                g.setColour (open ? theme::accent.withAlpha (0.2f) : theme::text.withAlpha (down ? 0.1f : 0.06f));
+                g.fillRoundedRectangle (r, 4.0f);
+            }
+            const auto c = hasLanes ? theme::accent : over ? theme::text : theme::textDim;
+            g.setColour (c);
+            auto icon = r.withSizeKeepingCentre (14.0f, 11.0f);
+            juce::Path curve;
+            curve.startNewSubPath (icon.getX(), icon.getBottom());
+            curve.lineTo (icon.getX() + icon.getWidth() * 0.35f, icon.getY() + icon.getHeight() * 0.25f);
+            curve.lineTo (icon.getX() + icon.getWidth() * 0.65f, icon.getY() + icon.getHeight() * 0.6f);
+            curve.lineTo (icon.getRight(), icon.getY());
+            g.strokePath (curve, juce::PathStrokeType (1.6f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+            for (auto pt : { juce::Point<float> (icon.getX() + icon.getWidth() * 0.35f, icon.getY() + icon.getHeight() * 0.25f),
+                             juce::Point<float> (icon.getX() + icon.getWidth() * 0.65f, icon.getY() + icon.getHeight() * 0.6f) })
+                g.fillEllipse (pt.x - 2, pt.y - 2, 4, 4);
+        }
+    } autoButton;
     juce::OwnedArray<LaneHeader> laneHeaders;
     juce::Viewport insertView;
     InsertList inserts;
@@ -534,12 +618,14 @@ public:
         g.fillAll (theme::lane);
 
         const int numTracks = (int) p.tracks.size();
-        for (int i = 0; i < numTracks; ++i)
+        const int numRows = owner.numRows();
+        for (int i = 0; i < numRows; ++i)
         {
             const int y = owner.trackTop (i) - owner.scrollY;
             if (y + owner.trackFullHeight (i) < 0 || y > getHeight()) continue;
-            const bool sel = owner.ctx.selectedTrackId == p.tracks[(size_t) i]->id;
-            g.setColour (sel ? theme::laneAlt.brighter (0.04f) : (i % 2 ? theme::laneAlt : theme::lane));
+            auto rt = owner.rowTrack (i);
+            const bool sel = owner.ctx.selectedTrackId == rt->id;
+            g.setColour (rt->isMaster ? theme::accent.withAlpha (0.06f).overlaidWith (theme::lane) : sel ? theme::laneAlt.brighter (0.04f) : (i % 2 ? theme::laneAlt : theme::lane));
             g.fillRect (0, y, getWidth(), trackHeight);
             g.setColour (theme::bg.brighter (0.02f));   // automation lanes are darker
             g.fillRect (0, y + trackHeight, getWidth(), owner.trackFullHeight (i) - trackHeight);
@@ -566,7 +652,7 @@ public:
             g.drawVerticalLine ((int) x, 0, (float) getHeight());
         }
 
-        for (int i = 0; i < numTracks; ++i)
+        for (int i = 0; i < numRows; ++i)
         {
             g.setColour (theme::bg);
             g.drawHorizontalLine (owner.trackTop (i) + owner.trackFullHeight (i) - owner.scrollY - 1, 0, (float) getWidth());
@@ -581,6 +667,14 @@ public:
             for (auto& c : t.clips)
                 drawClip (g, t, *c, getClipBounds (i, *c));
             drawAutomation (g, i);
+        }
+        if (p.showMaster)
+        {
+            const int y = owner.trackTop (numTracks) - owner.scrollY;
+            g.setColour (theme::accent.withAlpha (0.35f));
+            g.setFont (theme::font (11.0f, true));
+            g.drawText ("MASTER  -  volume and master effect automation", 10, y, 400, trackHeight, juce::Justification::centredLeft);
+            drawAutomation (g, numTracks);
         }
 
         // drop indicator
@@ -621,7 +715,9 @@ public:
 
     void drawAutomation (juce::Graphics& g, int trackIndex)
     {
-        auto& t = *owner.ctx.project.tracks[(size_t) trackIndex];
+        auto tp = owner.rowTrack (trackIndex);
+        if (tp == nullptr) return;
+        auto& t = *tp;
         int y = owner.trackTop (trackIndex) + trackHeight - owner.scrollY;
         for (int li = 0; li < (int) t.automation.size(); ++li)
         {
@@ -708,9 +804,9 @@ public:
     bool automationMouseDown (const juce::MouseEvent& e)
     {
         auto hit = owner.rowAt (e.y);
-        if (hit.track < 0 || hit.lane < 0 || hit.track >= (int) owner.ctx.project.tracks.size()) return false;
+        if (hit.track < 0 || hit.lane < 0 || owner.rowTrack (hit.track) == nullptr) return false;
         auto& p = owner.ctx.project;
-        auto track = p.tracks[(size_t) hit.track];
+        auto track = owner.rowTrack (hit.track);
         auto& lane = track->automation[(size_t) hit.lane];
         const int top = hit.laneTop - owner.scrollY;
         owner.ctx.selectTrack (track->id);
@@ -746,8 +842,9 @@ public:
     void automationMouseDrag (const juce::MouseEvent& e)
     {
         auto& p = owner.ctx.project;
-        if (dragLaneTrack >= (int) p.tracks.size()) return;
-        auto& lane = p.tracks[(size_t) dragLaneTrack]->automation[(size_t) dragLane];
+        auto dragTrack = owner.rowTrack (dragLaneTrack);
+        if (dragTrack == nullptr || dragLane >= (int) dragTrack->automation.size()) return;
+        auto& lane = dragTrack->automation[(size_t) dragLane];
         if (dragPoint < 0 || dragPoint >= (int) lane.points.size()) return;
         const juce::ScopedLock sl (p.lock);
         auto& pt = lane.points[(size_t) dragPoint];
@@ -961,11 +1058,12 @@ public:
     void mouseDoubleClick (const juce::MouseEvent& e) override
     {
         // double-click an automation point to delete it
-        if (auto hit = owner.rowAt (e.y); hit.track >= 0 && hit.lane >= 0 && hit.track < (int) owner.ctx.project.tracks.size())
+        if (auto hit = owner.rowAt (e.y); hit.track >= 0 && hit.lane >= 0 && owner.rowTrack (hit.track) != nullptr)
         {
             auto& p = owner.ctx.project;
-            auto& lane = p.tracks[(size_t) hit.track]->automation[(size_t) hit.lane];
-            if (const int pi = pointAt (*p.tracks[(size_t) hit.track], lane, hit.laneTop - owner.scrollY, e.getPosition()); pi >= 0)
+            auto rt = owner.rowTrack (hit.track);
+            auto& lane = rt->automation[(size_t) hit.lane];
+            if (const int pi = pointAt (*rt, lane, hit.laneTop - owner.scrollY, e.getPosition()); pi >= 0)
             {
                 p.beginEdit();
                 { const juce::ScopedLock sl (p.lock); lane.points.erase (lane.points.begin() + pi); }
@@ -1052,6 +1150,22 @@ TimelineView::TimelineView (AppContext& c) : ctx (c)
     addAndMakeVisible (*ruler);
     addAndMakeVisible (*lanes);
     addAndMakeVisible (headerHolder);
+    for (auto* b : { &addAudioButton, &addInstrumentButton, &addVocoderButton, &addSamplerButton, &addMasterButton })
+    {
+        addAndMakeVisible (*b);
+        b->getProperties().set ("compact", true);
+    }
+    addVocoderButton.setTooltip ("Add a track with the Vocoder, already listening to your vocal track");
+    addSamplerButton.setTooltip ("Add a track with the Sampler, ready to play (drop any sound on it)");
+    addMasterButton.setTooltip ("Show or hide the master track, for master volume and effect automation");
+    addMasterButton.onClick = [this]
+    {
+        ctx.project.beginEdit();
+        ctx.project.showMaster = ! ctx.project.showMaster;
+        ctx.project.changed();
+    };
+    addAudioButton.setTooltip ("Add an audio track for recording or loops");
+    addInstrumentButton.setTooltip ("Add a virtual instrument track you play with MIDI");
     addAndMakeVisible (hScroll);
     addAndMakeVisible (vScroll);
     hScroll.addListener (this);
@@ -1069,22 +1183,33 @@ TimelineView::~TimelineView()
     ctx.project.removeChangeListener (this);
 }
 
+int TimelineView::numRows() const { return (int) ctx.project.tracks.size() + (ctx.project.showMaster ? 1 : 0); }
+
+TrackPtr TimelineView::rowTrack (int row) const
+{
+    const int n = (int) ctx.project.tracks.size();
+    if (row >= 0 && row < n) return ctx.project.tracks[(size_t) row];
+    if (row == n && ctx.project.showMaster) return ctx.project.master;
+    return nullptr;
+}
+
 int TimelineView::trackFullHeight (int i) const
 {
-    if (i < 0 || i >= (int) ctx.project.tracks.size()) return trackHeight;
+    auto t = rowTrack (i);
+    if (t == nullptr) return trackHeight;
     int h = trackHeight;
-    for (auto& l : ctx.project.tracks[(size_t) i]->automation) if (l.visible) h += laneHeight;
+    for (auto& l : t->automation) if (l.visible) h += laneHeight;
     return h;
 }
 
 int TimelineView::trackTop (int i) const
 {
     int y = 0;
-    for (int k = 0; k < i && k < (int) ctx.project.tracks.size(); ++k) y += trackFullHeight (k);
+    for (int k = 0; k < i && k < numRows(); ++k) y += trackFullHeight (k);
     return y;
 }
 
-int TimelineView::contentHeight() const { return trackTop ((int) ctx.project.tracks.size()); }
+int TimelineView::contentHeight() const { return trackTop (numRows()); }
 
 TimelineView::RowHit TimelineView::rowAt (int yInLanes) const
 {
@@ -1092,7 +1217,7 @@ TimelineView::RowHit TimelineView::rowAt (int yInLanes) const
     const int y = yInLanes + scrollY;
     if (y < 0) return hit;
     int top = 0;
-    const int n = (int) ctx.project.tracks.size();
+    const int n = numRows();
     for (int i = 0; i < n; ++i)
     {
         const int h = trackFullHeight (i);
@@ -1102,7 +1227,7 @@ TimelineView::RowHit TimelineView::rowAt (int yInLanes) const
             if (y >= top + trackHeight)
             {
                 int laneTop = top + trackHeight;
-                const auto& trackLanes = ctx.project.tracks[(size_t) i]->automation;
+                const auto& trackLanes = rowTrack (i)->automation;
                 for (int l = 0; l < (int) trackLanes.size(); ++l)
                 {
                     if (! trackLanes[(size_t) l].visible) continue;
@@ -1114,7 +1239,7 @@ TimelineView::RowHit TimelineView::rowAt (int yInLanes) const
         }
         top += h;
     }
-    hit.track = n;   // below the last track
+    hit.track = (int) ctx.project.tracks.size() + (ctx.project.showMaster ? 1 : 0);   // below the last row
     return hit;
 }
 
@@ -1129,8 +1254,9 @@ double TimelineView::getSnap() const
 void TimelineView::rebuild()
 {
     headers.clear();
-    for (auto& t : ctx.project.tracks)
-        headerHolder.addAndMakeVisible (headers.add (new TrackHeader (*this, t)));
+    for (int i = 0; i < numRows(); ++i)
+        headerHolder.addAndMakeVisible (headers.add (new TrackHeader (*this, rowTrack (i))));
+    addMasterButton.setButtonText (ctx.project.showMaster ? juce::String::fromUTF8 ("\xe2\x80\x93 Master") : juce::String ("+ Master"));
     layoutHeaders();
     updateScrollBars();
     repaint();
@@ -1148,7 +1274,12 @@ void TimelineView::resized()
     auto bottom = r.removeFromBottom (12);
     vScroll.setBounds (r.removeFromRight (12).withTrimmedTop (rulerHeight));
     auto top = r.removeFromTop (rulerHeight);
-    top.removeFromLeft (headerWidth);
+    auto corner = top.removeFromLeft (headerWidth).reduced (4, 3);
+    const int widths[] { 58, 86, 70, 68, 62 };
+    juce::TextButton* order[] { &addAudioButton, &addInstrumentButton, &addVocoderButton, &addSamplerButton, &addMasterButton };
+    const float scale = (float) corner.getWidth() / (float) (58 + 86 + 70 + 68 + 62);
+    for (int i = 0; i < 5; ++i)
+        order[i]->setBounds (i == 4 ? corner : corner.removeFromLeft (juce::roundToInt ((float) widths[i] * scale)));
     ruler->setBounds (top);
     headerHolder.setBounds (r.removeFromLeft (headerWidth));
     lanes->setBounds (r);
@@ -1162,7 +1293,7 @@ void TimelineView::paint (juce::Graphics& g)
     g.fillAll (theme::panel);
     g.setColour (theme::textDim);
     g.setFont (theme::font (11.0f, true));
-    g.drawText ("TRACKS", 16, 0, headerWidth - 16, rulerHeight, juce::Justification::centredLeft);
+    juce::ignoreUnused (g);
 }
 
 void TimelineView::updateScrollBars()
@@ -1205,11 +1336,19 @@ void TimelineView::zoomToFit()
     repaint();
 }
 
+void TimelineView::mouseMagnify (const juce::MouseEvent& e, float scaleFactor)
+{
+    // pinch on the trackpad: zoom in / out around the fingers
+    zoom (scaleFactor, juce::jmax (0, e.getEventRelativeTo (lanes.get()).x));
+}
+
 void TimelineView::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& w)
 {
-    if (e.mods.isCommandDown() || e.mods.isCtrlDown())
+    // Option or Cmd + scroll zooms (as in Adobe's apps); smooth for trackpads, stepped for wheels
+    if (e.mods.isAltDown() || e.mods.isCommandDown() || e.mods.isCtrlDown())
     {
-        zoom (w.deltaY > 0 ? 1.15f : 1.0f / 1.15f, e.getEventRelativeTo (lanes.get()).x);
+        const float d = std::abs (w.deltaY) > std::abs (w.deltaX) ? w.deltaY : w.deltaX;
+        zoom (std::exp (juce::jlimit (-0.5f, 0.5f, d * (w.isSmooth ? 2.0f : 1.2f))), juce::jmax (0, e.getEventRelativeTo (lanes.get()).x));
         return;
     }
     float dx = w.deltaX, dy = w.deltaY;

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(Renasound VERSION 0.7.1 LANGUAGES C CXX)
+project(Renasound VERSION 0.8.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -25,6 +25,8 @@ else()
 endif()
 
 # ---- Images baked into the app ---------------------------------------------
+set(RENASOUND_BUILD_NUMBER 0 CACHE STRING "Build number, set by CI; the updater compares it with GitHub's")
+
 juce_add_binary_data(RenasoundAssets SOURCES Resources/logo_mark.png)
 
 # ---- Shared settings for the app and the test --------------------------------
@@ -63,6 +65,7 @@ target_sources(Renasound PRIVATE
     Source/Effects.cpp
     Source/StudioEq.cpp
     Source/Devices.cpp
+    Source/Updater.cpp
     Source/Pitch.cpp
     Source/Drums.cpp
     Source/MixcraftImport.cpp
@@ -81,7 +84,8 @@ target_include_directories(Renasound PRIVATE Source)
 target_compile_definitions(Renasound PRIVATE
     ${RENASOUND_DEFINITIONS}
     JUCE_APPLICATION_NAME_STRING="$<TARGET_PROPERTY:Renasound,JUCE_PRODUCT_NAME>"
-    JUCE_APPLICATION_VERSION_STRING="$<TARGET_PROPERTY:Renasound,JUCE_VERSION>")
+    JUCE_APPLICATION_VERSION_STRING="$<TARGET_PROPERTY:Renasound,JUCE_VERSION>"
+    RENASOUND_BUILD_NUMBER=${RENASOUND_BUILD_NUMBER})
 
 target_link_libraries(Renasound
     PRIVATE

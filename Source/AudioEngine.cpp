@@ -517,8 +517,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* in, int 
     // ---- master ----
     playheadSeconds = startPos;
     playheadRunning = run;
-    processChain (project.masterFx, mix, numSamples);
-    mix.applyGain (project.masterVolume);
+    processMaster (mix, startPos, numSamples);
     softClip (mix, numSamples);
     project.masterMeterL = juce::jmax (mix.getMagnitude (0, 0, numSamples), project.masterMeterL.load() * 0.85f);
     project.masterMeterR = juce::jmax (mix.getMagnitude (1, 0, numSamples), project.masterMeterR.load() * 0.85f);
@@ -554,6 +553,29 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* in, int 
 // =============================================================================
 //  Rendering
 // =============================================================================
+void AudioEngine::processMaster (juce::AudioBuffer<float>& mix, double startSec, int numSamples)
+{
+    auto& m = *project.master;
+    const double beat0 = startSec * project.bpm / 60.0;
+    const double beat1 = (startSec + numSamples / sampleRate) * project.bpm / 60.0;
+    float vol0 = project.masterVolume, vol1 = vol0;
+    bool volAuto = false;
+    for (auto& lane : m.automation)
+    {
+        if (lane.points.empty()) continue;
+        const float v0 = lane.valueAt (beat0), v1 = lane.valueAt (beat1);
+        if (lane.kind == AutomationLane::Kind::Volume)
+        {
+            vol0 = AutomationLane::valueToVolume (v0); vol1 = AutomationLane::valueToVolume (v1); volAuto = true;
+        }
+        else if (auto* param = m.getAutomationParameter (lane); param != nullptr && std::abs (param->getValue() - v0) > 1.0e-4f)
+            param->setValue (v0);
+    }
+    m.autoVolume = volAuto ? vol1 : -1.0f;
+    processChain (project.masterFx, mix, numSamples);
+    for (int ch = 0; ch < mix.getNumChannels(); ++ch) mix.applyGainRamp (ch, 0, numSamples, vol0, vol1);
+}
+
 void AudioEngine::renderBlock (juce::AudioBuffer<float>& out, double startSec, int numSamples, bool transportRunning,
                                const juce::MidiBuffer& live, int liveOffset, bool includeLive)
 {
@@ -872,8 +894,7 @@ bool AudioEngine::renderToFile (const juce::File& file, juce::String& error)
         sub.clear();
         renderBlock (sub, (double) done / sampleRate, n, true, none, 0, false);
         playheadSeconds = (double) done / sampleRate;
-        processChain (project.masterFx, sub, n);
-        sub.applyGain (project.masterVolume);
+        processMaster (sub, (double) done / sampleRate, n);
         softClip (sub, n);
         writer->writeFromAudioSampleBuffer (sub, 0, n);
     }

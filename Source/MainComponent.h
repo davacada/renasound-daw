@@ -7,6 +7,7 @@
 #include "UI/DeviceWindow.h"
 #include "MixcraftImport.h"
 #include "AbletonImport.h"
+#include "Updater.h"
 
 namespace rs
 {
@@ -33,6 +34,8 @@ public:
 
     void resized() override;
     void paint (juce::Graphics&) override;
+    void paintOverChildren (juce::Graphics&) override;
+    void mouseUp (const juce::MouseEvent&) override;   // clicking the clock switches bars / time
 
     juce::ApplicationCommandManager commandManager;
     std::function<void (const juce::String&)> onTitleChanged;
@@ -70,7 +73,11 @@ private:
                clickButton { "Metronome", IconButton::Icon::Metronome };
     juce::Label timeDisplay, bpmLabel;
     juce::Slider bpm;
-    juce::TextButton addAudio { "+ Audio" }, addInstrument { "+ Instrument" }, mixdown { "Mix down" }, settingsButton { "Audio setup" };
+    juce::TextButton mixdown { "Mix down" }, settingsButton { "Audio setup" }, updateButton { "Update" };
+    Updater updater;
+    bool userAskedForUpdate = false;
+    void updaterChanged();
+    void updateButtonClicked();
 
     // views
     TimelineView timeline { ctx };

@@ -25,6 +25,8 @@ public:
     void resized() override;
     void paint (juce::Graphics&) override;
     void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
+    void mouseMagnify (const juce::MouseEvent&, float scaleFactor) override;
+    void zoomAround (double factor, float xInNotes);
     bool keyPressed (const juce::KeyPress&) override;
 
     // geometry shared with the inner views

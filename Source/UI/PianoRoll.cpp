@@ -77,15 +77,26 @@ private:
 };
 
 // =============================================================================
+//  The note grid. Three tools:
+//    Select - click / drag a box to select, drag to move, drag an edge to resize
+//    Edit   - drag a note up / down for velocity, drag either edge for length
+//    Draw   - click to write a note (drag to set its length), click a note to move it
+//  Right-click anywhere for the menu. Keys: Delete, Cmd+A/C/X/V/D, arrows.
+// =============================================================================
 class PianoRoll::Grid : public juce::Component
 {
 public:
-    explicit Grid (PianoRoll& o) : owner (o) {}
+    explicit Grid (PianoRoll& o) : owner (o) { setWantsKeyboardFocus (true); }
 
     float beatToX (double b) const { return (float) (b * owner.pixelsPerBeat - owner.scrollX); }
     double xToBeat (float x) const { return (x + owner.scrollX) / owner.pixelsPerBeat; }
     int pitchToY (int p) const     { return (127 - p) * owner.noteHeight - owner.scrollY; }
     int yToPitch (int y) const     { return juce::jlimit (0, 127, 127 - (y + owner.scrollY) / owner.noteHeight); }
+
+    std::vector<int> selection;   // indices into the clip's notes
+
+    bool isSelected (int i) const { return std::find (selection.begin(), selection.end(), i) != selection.end(); }
+    void clearSelection()         { selection.clear(); repaint(); }
 
     void paint (juce::Graphics& g) override
     {
@@ -112,32 +123,56 @@ public:
 
         const int bpb = owner.ctx.project.beatsPerBar;
         const double last = xToBeat ((float) getWidth()) + 1;
-        for (double b = juce::jmax (0.0, std::floor (xToBeat (0))); b <= last; b += owner.snap)
+        const double step = owner.snap * std::pow (2.0, std::ceil (std::log2 (juce::jmax (1.0, 6.0 / (owner.snap * owner.pixelsPerBeat)))));
+        for (double b = juce::jmax (0.0, std::floor (xToBeat (0))); b <= last; b += step)
         {
             const bool bar = std::fmod (b, (double) bpb) < 1.0e-6, beat = std::fmod (b, 1.0) < 1.0e-6;
             g.setColour (bar ? theme::gridBar.brighter (0.2f) : beat ? theme::gridBar : theme::grid);
             g.drawVerticalLine ((int) beatToX (b), 0, (float) getHeight());
         }
 
-        // area outside the clip
         const float endX = beatToX (c.lengthBeats);
         g.setColour (juce::Colours::black.withAlpha (0.45f));
         g.fillRect (juce::Rectangle<float> (endX, 0, (float) getWidth() - endX, (float) getHeight()));
         g.setColour (theme::accent);
         g.fillRect (endX - 1, 0.0f, 2.0f, (float) getHeight());
 
-        // notes
+        // notes: brightness follows velocity; the Edit tool also shows a velocity bar
         const auto col = owner.track != nullptr ? owner.track->colour : theme::accent;
         for (size_t i = 0; i < c.notes.size(); ++i)
         {
-            auto r = noteBounds (c.notes[i]);
-            g.setColour (col.withAlpha (0.4f + 0.6f * c.notes[i].velocity));
+            const auto& n = c.notes[i];
+            auto r = noteBounds (n);
+            const bool sel = isSelected ((int) i);
+            g.setColour (col.withAlpha (0.35f + 0.65f * n.velocity));
             g.fillRoundedRectangle (r, 2.5f);
-            g.setColour ((int) i == selected ? juce::Colours::white : juce::Colours::black.withAlpha (0.5f));
-            g.drawRoundedRectangle (r, 2.5f, (int) i == selected ? 1.6f : 1.0f);
+            if (owner.tool == Tool::Edit && r.getWidth() > 6)
+            {
+                g.setColour (juce::Colours::white.withAlpha (0.55f));
+                g.fillRect (r.getX() + 2, r.getBottom() - 3, (r.getWidth() - 4) * n.velocity, 2.0f);
+            }
+            g.setColour (sel ? juce::Colours::white : juce::Colours::black.withAlpha (0.5f));
+            g.drawRoundedRectangle (r, 2.5f, sel ? 1.6f : 1.0f);
         }
 
-        // playhead (relative to the clip)
+        if (! marquee.isEmpty())
+        {
+            g.setColour (theme::accent.withAlpha (0.12f));
+            g.fillRect (marquee);
+            g.setColour (theme::accent.withAlpha (0.8f));
+            g.drawRect (marquee, 1.0f);
+        }
+
+        if (velocityReadout.isNotEmpty())
+        {
+            g.setColour (theme::bg.withAlpha (0.85f));
+            auto tip = juce::Rectangle<float> (readoutPos.x + 12, readoutPos.y - 26, 74, 20);
+            g.fillRoundedRectangle (tip, 4.0f);
+            g.setColour (theme::text);
+            g.setFont (theme::font (11.5f, true));
+            g.drawText (velocityReadout, tip, juce::Justification::centred);
+        }
+
         const double rel = owner.ctx.engine.getPositionBeats() - c.startBeat;
         if (rel >= 0 && rel <= c.lengthBeats)
         {
@@ -161,122 +196,401 @@ public:
         return -1;
     }
 
+    enum class Edge { None, Left, Right };
+    Edge edgeAt (int i, juce::Point<float> p) const
+    {
+        if (i < 0) return Edge::None;
+        auto r = noteBounds (owner.clip->notes[(size_t) i]);
+        const float grab = juce::jmin (6.0f, r.getWidth() * 0.3f);
+        if (p.x > r.getRight() - grab) return Edge::Right;
+        if (owner.tool != Tool::Draw && p.x < r.getX() + grab) return Edge::Left;
+        return Edge::None;
+    }
+
     void mouseMove (const juce::MouseEvent& e) override
     {
         const int i = noteAt (e.position);
-        if (i >= 0 && e.position.x > noteBounds (owner.clip->notes[(size_t) i]).getRight() - 6)
-            setMouseCursor (juce::MouseCursor::LeftRightResizeCursor);
-        else
-            setMouseCursor (i >= 0 ? juce::MouseCursor::DraggingHandCursor : juce::MouseCursor::NormalCursor);
+        const auto edge = edgeAt (i, e.position);
+        if (edge != Edge::None)                         setMouseCursor (juce::MouseCursor::LeftRightResizeCursor);
+        else if (i >= 0 && owner.tool == Tool::Edit)    setMouseCursor (juce::MouseCursor::UpDownResizeCursor);
+        else if (i >= 0)                                setMouseCursor (juce::MouseCursor::DraggingHandCursor);
+        else if (owner.tool == Tool::Draw)              setMouseCursor (juce::MouseCursor::CrosshairCursor);
+        else                                            setMouseCursor (juce::MouseCursor::NormalCursor);
     }
 
     void mouseDown (const juce::MouseEvent& e) override
     {
         if (owner.clip == nullptr) return;
-        auto& p = owner.ctx.project;
+        grabKeyboardFocus();
         auto& notes = owner.clip->notes;
         const int i = noteAt (e.position);
 
-        // right-click or alt-click deletes
-        if (i >= 0 && (e.mods.isPopupMenu() || e.mods.isAltDown()))
+        if (e.mods.isPopupMenu())
         {
-            p.beginEdit();
-            const juce::ScopedLock sl (p.lock);
-            notes.erase (notes.begin() + i);
-            selected = -1;
-            drag = Drag::None;
+            if (i >= 0 && ! isSelected (i)) selection = { i };
             repaint();
+            showMenu (e.position);
             return;
         }
-        if (e.mods.isPopupMenu()) return;
 
-        p.beginEdit();
+        downBeat = xToBeat (e.position.x);
+        downPos = e.position;
+        drag = Drag::None;
+
         if (i >= 0)
         {
-            selected = i;
-            drag = e.position.x > noteBounds (notes[(size_t) i]).getRight() - 6 ? Drag::Resize : Drag::Move;
+            if (e.mods.isShiftDown() || e.mods.isCommandDown())
+            {
+                // add to / take away from the selection
+                if (isSelected (i)) selection.erase (std::find (selection.begin(), selection.end(), i));
+                else selection.push_back (i);
+                repaint();
+                return;
+            }
+            if (! isSelected (i)) selection = { i };
+            const auto edge = edgeAt (i, e.position);
+            owner.ctx.project.beginEdit();
+            drag = edge == Edge::Right ? Drag::ResizeRight : edge == Edge::Left ? Drag::ResizeLeft
+                 : owner.tool == Tool::Edit ? Drag::Velocity : Drag::Move;
+            originals.clear();
+            for (int s : selection) originals.push_back (notes[(size_t) s]);
+            anchor = i;
+            audition (notes[(size_t) i].pitch);
+        }
+        else if (owner.tool == Tool::Draw)
+        {
+            // write a new note; dragging sets its length
+            MidiNote n;
+            n.pitch = yToPitch (e.y);
+            n.start = juce::jmax (0.0, std::floor (downBeat / owner.snap) * owner.snap);
+            n.length = lastLength;
+            n.velocity = lastVelocity;
+            if (n.start >= owner.clip->lengthBeats) return;
+            owner.ctx.project.beginEdit();
+            {
+                const juce::ScopedLock sl (owner.ctx.project.lock);
+                notes.push_back (n);
+            }
+            selection = { (int) notes.size() - 1 };
+            originals = { n };
+            anchor = selection[0];
+            drag = Drag::DrawLength;
+            audition (n.pitch);
         }
         else
         {
-            // add a note
-            MidiNote n;
-            n.pitch = yToPitch (e.y);
-            n.start = juce::jmax (0.0, std::floor (xToBeat (e.position.x) / owner.snap) * owner.snap);
-            n.length = lastLength;
-            if (n.start >= owner.clip->lengthBeats) return;
-            {
-                const juce::ScopedLock sl (p.lock);
-                notes.push_back (n);
-            }
-            selected = (int) notes.size() - 1;
-            drag = Drag::Move;
+            // empty space: start a selection box (Shift keeps the current selection)
+            if (! e.mods.isShiftDown()) selection.clear();
+            selectionBefore = selection;
+            drag = Drag::Marquee;
         }
-        orig = notes[(size_t) selected];
-        downBeat = xToBeat (e.position.x);
-        audition (orig.pitch);
         repaint();
     }
 
     void mouseDrag (const juce::MouseEvent& e) override
     {
-        if (owner.clip == nullptr || selected < 0 || drag == Drag::None) return;
+        if (owner.clip == nullptr || drag == Drag::None) return;
         auto& p = owner.ctx.project;
-        auto& n = owner.clip->notes[(size_t) selected];
-        const double delta = xToBeat (e.position.x) - downBeat;
-        const double s = e.mods.isShiftDown() ? 0.0 : owner.snap;
+        auto& notes = owner.clip->notes;
 
-        const juce::ScopedLock sl (p.lock);
-        if (drag == Drag::Move)
+        if (drag == Drag::Marquee)
         {
-            n.start = juce::jlimit (0.0, owner.clip->lengthBeats - 0.01, owner.ctx.snapBeat (orig.start + delta, s));
-            const int newPitch = yToPitch (e.y);
-            if (newPitch != n.pitch) { n.pitch = newPitch; audition (newPitch); }
+            marquee = juce::Rectangle<float> (downPos, e.position);
+            selection = selectionBefore;
+            for (int i = 0; i < (int) notes.size(); ++i)
+                if (marquee.intersects (noteBounds (notes[(size_t) i])) && ! isSelected (i)) selection.push_back (i);
+            repaint();
+            return;
         }
-        else
+
+        const double s = e.mods.isShiftDown() ? 0.0 : owner.snap;
+        const double delta = xToBeat (e.position.x) - downBeat;
+        const juce::ScopedLock sl (p.lock);
+
+        if (drag == Drag::Velocity)
         {
-            n.length = juce::jmax (s > 0 ? s : 0.05, owner.ctx.snapBeat (orig.start + orig.length + delta, s) - n.start);
-            lastLength = n.length;
+            const float dv = (downPos.y - e.position.y) / 150.0f;
+            for (size_t k = 0; k < selection.size(); ++k)
+                notes[(size_t) selection[k]].velocity = juce::jlimit (0.02f, 1.0f, originals[k].velocity + dv);
+            lastVelocity = notes[(size_t) anchor].velocity;
+            velocityReadout = "Vel " + juce::String (juce::roundToInt (lastVelocity * 127));
+            readoutPos = e.position;
+        }
+        else if (drag == Drag::Move)
+        {
+            const auto& a = originals[(size_t) (std::find (selection.begin(), selection.end(), anchor) - selection.begin())];
+            const double moved = owner.ctx.snapBeat (a.start + delta, s) - a.start;
+            const int dp = yToPitch (e.y) - a.pitch;
+            for (size_t k = 0; k < selection.size(); ++k)
+            {
+                auto& n = notes[(size_t) selection[k]];
+                n.start = juce::jlimit (0.0, owner.clip->lengthBeats - 0.01, originals[k].start + moved);
+                const int np = juce::jlimit (0, 127, originals[k].pitch + dp);
+                if (selection[k] == anchor && np != n.pitch) audition (np);
+                n.pitch = np;
+            }
+        }
+        else if (drag == Drag::ResizeRight || drag == Drag::DrawLength)
+        {
+            const auto& a = originals[(size_t) (std::find (selection.begin(), selection.end(), anchor) - selection.begin())];
+            const double minLen = s > 0 ? s : 0.03;
+            const double newEnd = owner.ctx.snapBeat (a.start + a.length + delta, s);
+            const double dl = juce::jmax (minLen, newEnd - a.start) - a.length;
+            for (size_t k = 0; k < selection.size(); ++k)
+                notes[(size_t) selection[k]].length = juce::jmax (minLen, originals[k].length + dl);
+            lastLength = notes[(size_t) anchor].length;
+        }
+        else if (drag == Drag::ResizeLeft)
+        {
+            const auto& a = originals[(size_t) (std::find (selection.begin(), selection.end(), anchor) - selection.begin())];
+            const double moved = owner.ctx.snapBeat (a.start + delta, s) - a.start;
+            for (size_t k = 0; k < selection.size(); ++k)
+            {
+                const auto& o = originals[k];
+                const double minLen = s > 0 ? s : 0.03;
+                const double ns = juce::jlimit (0.0, o.start + o.length - minLen, o.start + moved);
+                notes[(size_t) selection[k]].start = ns;
+                notes[(size_t) selection[k]].length = o.start + o.length - ns;
+            }
         }
         repaint();
     }
 
     void mouseUp (const juce::MouseEvent&) override
     {
-        if (drag != Drag::None) owner.ctx.project.changed();
+        if (drag != Drag::None && drag != Drag::Marquee) owner.ctx.project.changed();
         drag = Drag::None;
+        marquee = {};
+        velocityReadout.clear();
         stopAudition();
+        repaint();
     }
 
     void mouseDoubleClick (const juce::MouseEvent& e) override
     {
+        // Draw tool: double-click a note to remove it
         const int i = noteAt (e.position);
-        if (i < 0 || owner.clip == nullptr) return;
-        owner.ctx.project.beginEdit();
-        const juce::ScopedLock sl (owner.ctx.project.lock);
-        owner.clip->notes.erase (owner.clip->notes.begin() + i);
-        selected = -1;
-        repaint();
+        if (i < 0 || owner.clip == nullptr || owner.tool != Tool::Draw) return;
+        selection = { i };
+        deleteSelection();
     }
 
     bool keyPressed (const juce::KeyPress& k) override
     {
-        if ((k == juce::KeyPress::deleteKey || k == juce::KeyPress::backspaceKey) && owner.clip != nullptr
-             && selected >= 0 && selected < (int) owner.clip->notes.size())
+        if (owner.clip == nullptr) return false;
+        const auto m = k.getModifiers();
+        const int code = k.getKeyCode();
+        if (k == juce::KeyPress::deleteKey || k == juce::KeyPress::backspaceKey) { deleteSelection(); return true; }
+        if (m.isCommandDown() && code == 'A') { selectAll(); return true; }
+        if (m.isCommandDown() && code == 'C') { copy(); return true; }
+        if (m.isCommandDown() && code == 'X') { copy(); deleteSelection(); return true; }
+        if (m.isCommandDown() && code == 'V') { paste (pasteBeat()); return true; }
+        if (m.isCommandDown() && code == 'D') { duplicate(); return true; }
+        if (code == juce::KeyPress::upKey)    { transpose (m.isShiftDown() ? 12 : 1); return true; }
+        if (code == juce::KeyPress::downKey)  { transpose (m.isShiftDown() ? -12 : -1); return true; }
+        if (code == juce::KeyPress::leftKey)  { nudge (-owner.snap); return true; }
+        if (code == juce::KeyPress::rightKey) { nudge (owner.snap); return true; }
+        if (! m.isAnyModifierKeyDown())
         {
-            owner.ctx.project.beginEdit();
-            const juce::ScopedLock sl (owner.ctx.project.lock);
-            owner.clip->notes.erase (owner.clip->notes.begin() + selected);
-            selected = -1;
-            repaint();
-            return true;
+            if (code == 'V' || code == '1') { owner.setTool (Tool::Select); return true; }
+            if (code == 'E' || code == '2') { owner.setTool (Tool::Edit); return true; }
+            if (code == 'D' || code == 'B' || code == '3') { owner.setTool (Tool::Draw); return true; }
         }
+        if (k == juce::KeyPress::escapeKey) { clearSelection(); return true; }
         return false;
     }
 
-    int selected = -1;
+    // ---- editing operations (each one is a single undo step) ----
+    void selectAll()
+    {
+        selection.clear();
+        for (int i = 0; i < (int) owner.clip->notes.size(); ++i) selection.push_back (i);
+        repaint();
+    }
+
+    void deleteSelection()
+    {
+        if (selection.empty()) return;
+        auto sorted = selection;
+        std::sort (sorted.rbegin(), sorted.rend());
+        owner.ctx.project.beginEdit();
+        {
+            const juce::ScopedLock sl (owner.ctx.project.lock);
+            for (int i : sorted) if (i < (int) owner.clip->notes.size()) owner.clip->notes.erase (owner.clip->notes.begin() + i);
+        }
+        selection.clear();
+        owner.ctx.project.changed();
+    }
+
+    void copy()
+    {
+        clipboard().clear();
+        double first = 1.0e9;
+        for (int i : selection) first = juce::jmin (first, owner.clip->notes[(size_t) i].start);
+        for (int i : selection) { auto n = owner.clip->notes[(size_t) i]; n.start -= first; clipboard().push_back (n); }
+    }
+
+    void paste (double atBeat)
+    {
+        if (clipboard().empty()) return;
+        owner.ctx.project.beginEdit();
+        selection.clear();
+        {
+            const juce::ScopedLock sl (owner.ctx.project.lock);
+            for (auto n : clipboard())
+            {
+                n.start += atBeat;
+                if (n.start >= owner.clip->lengthBeats) continue;
+                owner.clip->notes.push_back (n);
+                selection.push_back ((int) owner.clip->notes.size() - 1);
+            }
+        }
+        owner.ctx.project.changed();
+    }
+
+    void duplicate()
+    {
+        if (selection.empty()) return;
+        double first = 1.0e9, last = 0;
+        for (int i : selection) { auto& n = owner.clip->notes[(size_t) i]; first = juce::jmin (first, n.start); last = juce::jmax (last, n.start + n.length); }
+        copy();
+        const double span = std::ceil ((last - first) / owner.snap - 1.0e-6) * owner.snap;
+        paste (first + juce::jmax (owner.snap, span));
+    }
+
+    template <typename Fn> void changeSelected (Fn&& fn)
+    {
+        auto targets = selection;
+        if (targets.empty()) for (int i = 0; i < (int) owner.clip->notes.size(); ++i) targets.push_back (i);
+        if (targets.empty()) return;
+        owner.ctx.project.beginEdit();
+        {
+            const juce::ScopedLock sl (owner.ctx.project.lock);
+            for (int i : targets) fn (owner.clip->notes[(size_t) i]);
+        }
+        owner.ctx.project.changed();
+    }
+
+    void transpose (int semis) { changeSelected ([semis] (MidiNote& n) { n.pitch = juce::jlimit (0, 127, n.pitch + semis); }); }
+    void nudge (double beats)
+    {
+        const double len = owner.clip->lengthBeats;
+        changeSelected ([beats, len] (MidiNote& n) { n.start = juce::jlimit (0.0, len - 0.01, n.start + beats); });
+    }
+    void quantize (double grid, bool lengthsToo)
+    {
+        changeSelected ([grid, lengthsToo] (MidiNote& n)
+        {
+            n.start = std::round (n.start / grid) * grid;
+            if (lengthsToo) n.length = juce::jmax (grid, std::round (n.length / grid) * grid);
+        });
+    }
+
+    double pasteBeat() const
+    {
+        // at the playhead if it's inside this clip, otherwise right after the selection
+        const double rel = owner.ctx.engine.getPositionBeats() - owner.clip->startBeat;
+        if (rel >= 0 && rel < owner.clip->lengthBeats) return std::floor (rel / owner.snap) * owner.snap;
+        return 0.0;
+    }
+
+    void showMenu (juce::Point<float> at)
+    {
+        juce::PopupMenu m;
+        const bool hasSel = ! selection.empty();
+        const bool hasNotes = ! owner.clip->notes.empty();
+        const double clickBeat = juce::jmax (0.0, std::floor (xToBeat (at.x) / owner.snap) * owner.snap);
+        juce::Component::SafePointer<Grid> sp (this);
+        auto act = [sp] (std::function<void (Grid&)> f) { return [sp, f] { if (sp != nullptr) f (*sp); }; };
+
+        m.addItem ("Cut", hasSel, false, act ([] (Grid& g) { g.copy(); g.deleteSelection(); }));
+        m.addItem ("Copy", hasSel, false, act ([] (Grid& g) { g.copy(); }));
+        m.addItem ("Paste here", ! clipboard().empty(), false, act ([clickBeat] (Grid& g) { g.paste (clickBeat); }));
+        m.addItem ("Duplicate", hasSel, false, act ([] (Grid& g) { g.duplicate(); }));
+        m.addItem ("Delete", hasSel, false, act ([] (Grid& g) { g.deleteSelection(); }));
+        m.addSeparator();
+        m.addItem ("Select all", hasNotes, false, act ([] (Grid& g) { g.selectAll(); }));
+        m.addItem ("Select none", hasSel, false, act ([] (Grid& g) { g.clearSelection(); }));
+        m.addSeparator();
+
+        const juce::String scope = hasSel ? " selected" : " all";
+        juce::PopupMenu q;
+        for (auto [name, grid] : { std::pair { "1/4", 1.0 }, { "1/8", 0.5 }, { "1/16", 0.25 }, { "1/32", 0.125 } })
+            q.addItem (juce::String ("Starts to ") + name, hasNotes, false, act ([grid] (Grid& g) { g.quantize (grid, false); }));
+        q.addSeparator();
+        q.addItem ("Starts and lengths to the grid", hasNotes, false, act ([] (Grid& g) { g.quantize (g.owner.snap, true); }));
+        m.addSubMenu ("Quantize" + scope, q, hasNotes);
+
+        juce::PopupMenu t;
+        t.addItem ("Up a semitone", hasNotes, false, act ([] (Grid& g) { g.transpose (1); }));
+        t.addItem ("Down a semitone", hasNotes, false, act ([] (Grid& g) { g.transpose (-1); }));
+        t.addItem ("Up an octave", hasNotes, false, act ([] (Grid& g) { g.transpose (12); }));
+        t.addItem ("Down an octave", hasNotes, false, act ([] (Grid& g) { g.transpose (-12); }));
+        m.addSubMenu ("Transpose" + scope, t, hasNotes);
+
+        juce::PopupMenu v;
+        for (int pct : { 25, 50, 75, 100 })
+            v.addItem ("Set to " + juce::String (pct) + "%", hasNotes, false, act ([pct] (Grid& g) { g.changeSelected ([pct] (MidiNote& n) { n.velocity = (float) pct / 100.0f; }); }));
+        v.addSeparator();
+        v.addItem ("Softer (-10%)", hasNotes, false, act ([] (Grid& g) { g.changeSelected ([] (MidiNote& n) { n.velocity = juce::jlimit (0.02f, 1.0f, n.velocity - 0.1f); }); }));
+        v.addItem ("Louder (+10%)", hasNotes, false, act ([] (Grid& g) { g.changeSelected ([] (MidiNote& n) { n.velocity = juce::jlimit (0.02f, 1.0f, n.velocity + 0.1f); }); }));
+        v.addItem ("Humanize", hasNotes, false, act ([] (Grid& g)
+        {
+            juce::Random rnd;
+            g.changeSelected ([&rnd] (MidiNote& n) { n.velocity = juce::jlimit (0.05f, 1.0f, n.velocity + (rnd.nextFloat() - 0.5f) * 0.2f); });
+        }));
+        m.addSubMenu ("Velocity" + scope, v, hasNotes);
+
+        juce::PopupMenu l;
+        l.addItem ("Double", hasNotes, false, act ([] (Grid& g) { g.changeSelected ([] (MidiNote& n) { n.length *= 2.0; }); }));
+        l.addItem ("Halve", hasNotes, false, act ([] (Grid& g) { g.changeSelected ([] (MidiNote& n) { n.length = juce::jmax (0.03, n.length * 0.5); }); }));
+        l.addItem ("Set to one grid step", hasNotes, false, act ([] (Grid& g) { const double s = g.owner.snap; g.changeSelected ([s] (MidiNote& n) { n.length = s; }); }));
+        l.addItem ("Legato (each note up to the next)", hasNotes, false, act ([] (Grid& g) { g.legato(); }));
+        m.addSubMenu ("Length" + scope, l, hasNotes);
+
+        m.addSeparator();
+        juce::PopupMenu tools;
+        tools.addItem ("Select   (V)", true, owner.tool == Tool::Select, act ([] (Grid& g) { g.owner.setTool (Tool::Select); }));
+        tools.addItem ("Edit   (E)", true, owner.tool == Tool::Edit, act ([] (Grid& g) { g.owner.setTool (Tool::Edit); }));
+        tools.addItem ("Draw   (D)", true, owner.tool == Tool::Draw, act ([] (Grid& g) { g.owner.setTool (Tool::Draw); }));
+        m.addSubMenu ("Tool", tools);
+        juce::PopupMenu grid;
+        int id = 1;
+        for (auto [name, val] : { std::pair { "1/4", 1.0 }, { "1/8", 0.5 }, { "1/16", 0.25 }, { "1/32", 0.125 } })
+        {
+            const int boxId = id++;
+            grid.addItem (name, true, juce::approximatelyEqual (owner.snap, val), act ([boxId] (Grid& g) { g.owner.snapBox.setSelectedId (boxId); }));
+        }
+        m.addSubMenu ("Grid", grid);
+
+        m.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (juce::Rectangle<int> (1, 1).withPosition (localPointToGlobal (at.toInt()))));
+    }
+
+    void legato()
+    {
+        auto& notes = owner.clip->notes;
+        std::vector<int> order = selection;
+        if (order.empty()) for (int i = 0; i < (int) notes.size(); ++i) order.push_back (i);
+        std::sort (order.begin(), order.end(), [&notes] (int a, int b) { return notes[(size_t) a].start < notes[(size_t) b].start; });
+        owner.ctx.project.beginEdit();
+        {
+            const juce::ScopedLock sl (owner.ctx.project.lock);
+            for (size_t k = 0; k < order.size(); ++k)
+            {
+                auto& n = notes[(size_t) order[k]];
+                double next = owner.clip->lengthBeats;
+                for (size_t j = k + 1; j < order.size(); ++j)
+                    if (notes[(size_t) order[j]].start > n.start + 1.0e-6) { next = notes[(size_t) order[j]].start; break; }
+                n.length = juce::jmax (0.03, next - n.start);
+            }
+        }
+        owner.ctx.project.changed();
+    }
 
 private:
-    enum class Drag { None, Move, Resize };
+    enum class Drag { None, Move, ResizeRight, ResizeLeft, Velocity, DrawLength, Marquee };
+
+    static std::vector<MidiNote>& clipboard() { static std::vector<MidiNote> c; return c; }
 
     void audition (int pitch)
     {
@@ -294,8 +608,14 @@ private:
 
     PianoRoll& owner;
     Drag drag = Drag::None;
-    MidiNote orig;
+    std::vector<MidiNote> originals;
+    std::vector<int> selectionBefore;
+    int anchor = -1;
+    juce::Point<float> downPos, readoutPos;
+    juce::Rectangle<float> marquee;
+    juce::String velocityReadout;
     double downBeat = 0, lastLength = 1.0;
+    float lastVelocity = 0.8f;
     int auditioning = -1;
 };
 
@@ -348,18 +668,18 @@ PianoRoll::PianoRoll (AppContext& c) : ctx (c)
     };
 
     addAndMakeVisible (quantize);
-    quantize.setTooltip ("Snap every note's start to the grid");
-    quantize.onClick = [this]
+    quantize.setTooltip ("Snap the selected notes' starts to the grid (all notes if none are selected)");
+    quantize.onClick = [this] { if (clip != nullptr) grid->quantize (snap, false); };
+
+    for (auto* b : { &selectTool, &editTool, &drawTool })
     {
-        if (clip == nullptr) return;
-        ctx.project.beginEdit();
-        {
-            const juce::ScopedLock sl (ctx.project.lock);
-            for (auto& n : clip->notes)
-                n.start = std::round (n.start / snap) * snap;
-        }
-        ctx.project.changed();
-    };
+        addAndMakeVisible (*b);
+        b->onClick = [this, b] { setTool (b->which); };
+    }
+    selectTool.setTooltip ("Select (V): click or drag a box to select notes, then move or resize them");
+    editTool.setTooltip ("Edit (E): drag notes up / down to change velocity, drag an edge to change length");
+    drawTool.setTooltip ("Draw (D): click to write notes, drag to set their length");
+    setTool (Tool::Select);
 
     addAndMakeVisible (clearNotes);
     clearNotes.onClick = [this]
@@ -390,11 +710,14 @@ void PianoRoll::showClip (int clipId, bool resetView)
     clip = ctx.project.findClip (clipId, &owner);
     if (clip != nullptr && clip->type != Clip::Type::Midi) clip = nullptr;
     track = clip != nullptr ? owner : nullptr;
-    if (clip == nullptr || grid->selected >= (int) clip->notes.size()) grid->selected = -1;
+    if (clip == nullptr) grid->selection.clear();
+    else
+        grid->selection.erase (std::remove_if (grid->selection.begin(), grid->selection.end(),
+                                               [this] (int i) { return i >= (int) clip->notes.size(); }), grid->selection.end());
 
     if (resetView)
     {
-        grid->selected = -1;
+        grid->selection.clear();
         scrollX = 0;
     }
     if (resetView && clip != nullptr && ! clip->notes.empty())
@@ -433,6 +756,10 @@ void PianoRoll::resized()
 {
     auto r = getLocalBounds();
     auto bar = r.removeFromTop (toolbarHeight).reduced (8, 5);
+    selectTool.setBounds (bar.removeFromLeft (78));
+    editTool.setBounds (bar.removeFromLeft (64));
+    drawTool.setBounds (bar.removeFromLeft (70));
+    bar.removeFromLeft (14);
     clearNotes.setBounds (bar.removeFromRight (64)); bar.removeFromRight (6);
     quantize.setBounds (bar.removeFromRight (80));   bar.removeFromRight (6);
     snapBox.setBounds (bar.removeFromRight (100));   bar.removeFromRight (6);
@@ -467,11 +794,89 @@ void PianoRoll::scrollBarMoved (juce::ScrollBar* b, double start)
     repaint();
 }
 
+void PianoRoll::setTool (Tool t)
+{
+    tool = t;
+    for (auto* b : { &selectTool, &editTool, &drawTool }) b->setToggleState (b->which == t, juce::dontSendNotification);
+    if (grid != nullptr) grid->repaint();
+}
+
+void PianoRoll::ToolButton::paintButton (juce::Graphics& g, bool over, bool down)
+{
+    auto r = getLocalBounds().toFloat().reduced (1.0f);
+    const bool on = getToggleState();
+    if (on || over || down)
+    {
+        g.setColour (on ? theme::accent.withAlpha (0.2f) : theme::text.withAlpha (down ? 0.1f : 0.055f));
+        g.fillRoundedRectangle (r, 5.0f);
+    }
+    const auto c = on ? theme::accent.brighter (0.2f) : over ? theme::text : theme::textDim;
+    g.setColour (c);
+    auto icon = r.removeFromLeft (r.getHeight()).reduced (6.0f);
+    juce::Path p;
+    switch (which)
+    {
+        case Tool::Select:   // arrow pointer
+            p.startNewSubPath (icon.getX() + 2, icon.getY());
+            p.lineTo (icon.getX() + 2, icon.getBottom() - 2);
+            p.lineTo (icon.getX() + 5.5f, icon.getBottom() - 5.5f);
+            p.lineTo (icon.getX() + 8, icon.getBottom());
+            p.lineTo (icon.getX() + 10, icon.getBottom() - 1);
+            p.lineTo (icon.getX() + 7.5f, icon.getBottom() - 6.5f);
+            p.lineTo (icon.getRight() - 1, icon.getBottom() - 6.5f);
+            p.closeSubPath();
+            g.fillPath (p);
+            break;
+        case Tool::Edit:     // velocity bars
+            for (int k = 0; k < 4; ++k)
+            {
+                const float h = icon.getHeight() * (0.35f + 0.2f * (float) ((k * 5) % 4));
+                g.fillRoundedRectangle (icon.getX() + k * icon.getWidth() / 4.0f + 0.5f, icon.getBottom() - h, icon.getWidth() / 4.0f - 1.5f, h, 1.0f);
+            }
+            break;
+        case Tool::Draw:     // pencil
+        {
+            juce::Path pen;
+            pen.addRectangle (-1.6f, -6.0f, 3.2f, 9.0f);
+            pen.addTriangle (-1.6f, 3.0f, 1.6f, 3.0f, 0.0f, 6.5f);
+            pen.applyTransform (juce::AffineTransform::rotation (juce::MathConstants<float>::pi * 0.25f).translated (icon.getCentre()));
+            g.fillPath (pen);
+            break;
+        }
+    }
+    g.setFont (theme::font (12.5f, true));
+    g.drawText (getName(), r, juce::Justification::centredLeft);
+}
+
+void PianoRoll::zoomAround (double factor, float xInGrid)
+{
+    const double beatAt = (xInGrid + scrollX) / pixelsPerBeat;
+    pixelsPerBeat = juce::jlimit (8.0, 600.0, pixelsPerBeat * factor);
+    scrollX = juce::jmax (0.0, beatAt * pixelsPerBeat - xInGrid);
+    updateScrollBars();
+    repaint();
+}
+
+void PianoRoll::mouseMagnify (const juce::MouseEvent& e, float scaleFactor)
+{
+    zoomAround (scaleFactor, (float) e.getEventRelativeTo (grid.get()).x);
+}
+
 void PianoRoll::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& w)
 {
-    if (e.mods.isCommandDown() || e.mods.isCtrlDown())
+    const float d = std::abs (w.deltaY) > std::abs (w.deltaX) ? w.deltaY : w.deltaX;
+    if ((e.mods.isAltDown() || e.mods.isCommandDown() || e.mods.isCtrlDown()) && e.mods.isShiftDown())
     {
-        pixelsPerBeat = juce::jlimit (12.0, 400.0, pixelsPerBeat * (w.deltaY > 0 ? 1.15 : 1.0 / 1.15));
+        // vertical zoom: taller / shorter note rows, keeping the pitch under the mouse in place
+        const int my = e.getEventRelativeTo (grid.get()).y;
+        const double pitchAt = (my + scrollY) / (double) noteHeight;
+        noteHeight = juce::jlimit (7, 30, noteHeight + (d > 0 ? 1 : -1));
+        scrollY = juce::jlimit (0, juce::jmax (0, 128 * noteHeight - grid->getHeight()), (int) (pitchAt * noteHeight) - my);
+    }
+    else if (e.mods.isAltDown() || e.mods.isCommandDown() || e.mods.isCtrlDown())
+    {
+        zoomAround (std::exp (juce::jlimit (-0.5f, 0.5f, d * (w.isSmooth ? 2.0f : 1.2f))), (float) e.getEventRelativeTo (grid.get()).x);
+        return;
     }
     else
     {

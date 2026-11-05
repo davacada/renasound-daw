@@ -32,5 +32,6 @@ std::unique_ptr<BuiltinFx> createAmp();
 std::unique_ptr<BuiltinFx> createPunch();
 std::unique_ptr<BuiltinFx> createKickSynth();
 std::unique_ptr<BuiltinFx> createVocoder();
+std::unique_ptr<BuiltinFx> createSampler();
 
 } // namespace rs

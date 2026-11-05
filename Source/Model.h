@@ -210,10 +210,15 @@ struct Track
     // Insert effects, processed in order before the fader
     std::vector<FxPtr> fx;
 
+    // The master track (Project::master) isn't in the track list; its effects are the master bus's
+    bool isMaster = false;
+    std::vector<FxPtr>* externalFx = nullptr;
+    const std::vector<FxPtr>& effects() const { return externalFx != nullptr ? *externalFx : fx; }
+
     // Automation lanes shown under the track
     std::vector<AutomationLane> automation;
     std::atomic<float> autoVolume { -1.0f }, autoPan { -2.0f };   // what automation is doing right now (for the UI)
-    FxSlot* findFx (int uid) const { for (auto& f : fx) if (f->uid == uid) return f.get(); return nullptr; }
+    FxSlot* findFx (int uid) const { for (auto& f : effects()) if (f->uid == uid) return f.get(); return nullptr; }
     juce::AudioProcessorParameter* getAutomationParameter (const AutomationLane&) const;
 
     // Written by the audio thread, read by meters
@@ -243,6 +248,10 @@ public:
     float masterVolume = 0.9f;
     std::vector<FxPtr> masterFx;
     std::atomic<float> masterMeterL { 0 }, masterMeterR { 0 };
+
+    // The master track: shown in the timeline with "+ Master", for master volume / effect automation
+    TrackPtr master;
+    bool showMaster = false;
 
     juce::File file;                      // where it was last saved
     bool dirty = false;

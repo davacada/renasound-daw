@@ -7,6 +7,8 @@ namespace rs
 // =============================================================================
 //  Piano roll editor for the selected MIDI clip
 // =============================================================================
+enum class Tool { Select, Edit, Draw };
+
 class PianoRoll : public juce::Component,
                   public juce::ChangeListener,
                   public juce::ScrollBar::Listener,
@@ -28,6 +30,9 @@ public:
     double snap = 0.25;
     static constexpr int keysWidth = 76, toolbarHeight = 36;
 
+    Tool tool = Tool::Select;
+    void setTool (Tool);
+
     ClipPtr clip;
     TrackPtr track;
     AppContext& ctx;
@@ -40,11 +45,22 @@ private:
     juce::ScrollBar hScroll { false }, vScroll { true };
     juce::ComboBox preset, snapBox;
     juce::TextButton quantize { "Quantize" }, clearNotes { "Clear" };
+
+    // Select / Edit / Draw, each an icon with its name
+    struct ToolButton : juce::Button
+    {
+        ToolButton (const juce::String& n, Tool t) : juce::Button (n), which (t) { setClickingTogglesState (false); }
+        Tool which;
+        void paintButton (juce::Graphics&, bool over, bool down) override;
+    };
+    ToolButton selectTool { "Select", Tool::Select }, editTool { "Edit", Tool::Edit }, drawTool { "Draw", Tool::Draw };
     juce::Label title;
 
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
     void scrollBarMoved (juce::ScrollBar*, double) override;
     void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
+    void mouseMagnify (const juce::MouseEvent&, float scaleFactor) override;
+    void zoomAround (double factor, float xInGrid);
     void timerCallback() override;
     void updateScrollBars();
     void refreshHeader();

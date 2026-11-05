@@ -27,7 +27,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64"
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64" -DRENASOUND_BUILD_NUMBER=${{ github.run_number }}
 
       - name: Build
         run: cmake --build build --config Release --parallel --target Renasound
@@ -62,6 +62,8 @@ jobs:
         with:
           path: out
           merge-multiple: true
+      # the app's Update button compares this number with its own
+      - run: echo "${{ github.run_number }}" > out/version.txt
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
@@ -69,7 +71,7 @@ jobs:
           prerelease: false
           make_latest: true
           body: |
-            RENASOUND built from ${{ github.sha }}.
+            RENASOUND build ${{ github.run_number }} (${{ github.sha }}). Once installed, the Update button next to Audio setup fetches newer builds.
 
             **Mac:** download RENASOUND-macOS.dmg, open it and drag RENASOUND into Applications. The first time, right-click RENASOUND, choose Open, then Open again (the app isn't signed with an Apple developer certificate yet).
             **Windows:** download RENASOUND-Windows.zip, unzip it and run RENASOUND.exe (if SmartScreen warns, choose More info, then Run anyway).

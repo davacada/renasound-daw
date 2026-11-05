@@ -1,4 +1,5 @@
 #include "MainComponent.h"
+#include "Devices.h"
 
 namespace rs
 {
@@ -29,6 +30,9 @@ MainComponent::MainComponent()
     addAndMakeVisible (timeDisplay);
     timeDisplay.setFont (juce::Font (juce::FontOptions (juce::Font::getDefaultMonospacedFontName(), 20.0f, juce::Font::bold)));
     timeDisplay.setJustificationType (juce::Justification::centred);
+    timeDisplay.setTooltip ("Click to switch between bars / beats and minutes / seconds");
+    timeDisplay.setMouseCursor (juce::MouseCursor::PointingHandCursor);
+    timeDisplay.addMouseListener (this, false);
     timeDisplay.setColour (juce::Label::backgroundColourId, theme::bg);
     timeDisplay.setColour (juce::Label::textColourId, theme::accent);
 
@@ -55,21 +59,60 @@ MainComponent::MainComponent()
         timeline.repaint();
     };
 
-    for (auto* b : { &addAudio, &addInstrument, &mixdown, &settingsButton })
+    for (auto* b : { &mixdown, &settingsButton })
         addAndMakeVisible (b);
-    addAudio.onClick      = [this] { addTrack (Track::Type::Audio); };
-    addInstrument.onClick = [this]
+    // + Vocoder / + Sampler: a new instrument track with that device loaded and its window open
+    auto addDeviceTrack = [this] (const juce::String& type, const juce::String& name, std::function<void (FxSlot&)> setup = {}) -> FxPtr
+    {
+        juce::String error;
+        auto slot = engine.createFx (type, nullptr, error);
+        if (slot == nullptr) { showMessage ("Couldn't add " + name, error); return nullptr; }
+        project.beginEdit();
+        auto t = project.addTrack (Track::Type::Instrument);
+        t->name = name;
+        if (setup) setup (*slot);
+        project.setInstrument (t->id, slot);
+        ctx.selectTrack (t->id);
+        project.changed();
+        openDevice (t->id, slot, true);
+        return slot;
+    };
+    timeline.addVocoderButton.onClick = [this, addDeviceTrack]
+    {
+        // listen to the vocal: the selected audio track, else one named like a vocal, else the first audio track
+        int source = 0;
+        if (auto sel = project.findTrack (ctx.selectedTrackId); sel != nullptr && sel->type == Track::Type::Audio) source = sel->id;
+        if (source == 0)
+            for (auto& t : project.tracks)
+                if (t->type == Track::Type::Audio)
+                    for (auto* w : { "vocal", "vox", "voice", "sing", "lead" })
+                        if (source == 0 && t->name.containsIgnoreCase (w)) source = t->id;
+        if (source == 0)
+            for (auto& t : project.tracks) if (source == 0 && t->type == Track::Type::Audio) source = t->id;
+        addDeviceTrack ("builtin:vocoder", "Vocoder", [source] (FxSlot& s)
+        {
+            if (auto* sc = dynamic_cast<SidechainUser*> (s.processor.get())) sc->sidechainTrackId = source;
+        });
+    };
+    timeline.addSamplerButton.onClick = [addDeviceTrack] { addDeviceTrack ("builtin:sampler", "Sampler"); };
+
+    // the add-track buttons live on the timeline, above the track headers
+    timeline.addAudioButton.onClick = [this] { addTrack (Track::Type::Audio); };
+    timeline.addInstrumentButton.onClick = [this]
     {
         addTrack (Track::Type::Instrument);
         // straight away: which instrument should the new track play?
-        if (! project.tracks.empty()) devicemenus::showInstrumentMenu (ctx, project.tracks.back()->id, &addInstrument);
+        if (! project.tracks.empty()) devicemenus::showInstrumentMenu (ctx, project.tracks.back()->id, &timeline.addInstrumentButton);
     };
     mixdown.onClick       = [this] { exportMixdown(); };
     settingsButton.onClick = [this] { showAudioSettings(); };
-    addAudio.setTooltip ("Add an audio track for recording or loops");
-    addInstrument.setTooltip ("Add a virtual instrument track you play with MIDI");
+    addAndMakeVisible (updateButton);
+    updateButton.onClick = [this] { updateButtonClicked(); };
+    updateButton.setTooltip ("Get the newest RENASOUND (this is build " + juce::String (Updater::currentBuild()) + ")");
+    updater.onStateChanged = [this] { updaterChanged(); };
+    juce::Timer::callAfterDelay (4000, [sp = juce::Component::SafePointer<MainComponent> (this)] { if (sp != nullptr) sp->updater.check(); });
     mixdown.setTooltip ("Export your song as a WAV file");
-    mixdown.setColour (juce::TextButton::buttonColourId, theme::accent);
+    mixdown.setColour (juce::TextButton::textColourOffId, theme::accent);
 
     // ---- views ----
     addAndMakeVisible (timeline);
@@ -155,6 +198,86 @@ MainComponent::~MainComponent()
 }
 
 // =============================================================================
+// ---- updates ----
+void MainComponent::updaterChanged()
+{
+    using S = Updater::State;
+    const auto st = updater.getState();
+    juce::String label = "Update";
+    auto colour = theme::text;
+    switch (st)
+    {
+        case S::Idle:           break;
+        case S::Checking:       label = "Checking..."; colour = theme::textDim; break;
+        case S::UpToDate:       label = "Up to date"; colour = theme::textDim; break;
+        case S::Available:      label = juce::String::fromUTF8 ("Update \xe2\x97\x8f"); colour = theme::accent; break;
+        case S::Downloading:    label = "Updating " + juce::String (juce::roundToInt (updater.getProgress() * 100.0f)) + "%"; colour = theme::accent; break;
+        case S::ReadyToInstall: label = "Restart to update"; colour = theme::accent; break;
+        case S::Failed:         label = "Update"; break;
+    }
+    updateButton.setButtonText (label);
+    updateButton.setColour (juce::TextButton::textColourOffId, colour);
+
+    if (! userAskedForUpdate) return;
+    if (st == S::UpToDate)
+    {
+        userAskedForUpdate = false;
+        showMessage ("You're up to date", "This is the newest RENASOUND (build " + juce::String (Updater::currentBuild()) + ").");
+    }
+    else if (st == S::Failed)
+    {
+        userAskedForUpdate = false;
+        showMessage ("Couldn't update", updater.getError());
+    }
+    else if (st == S::Available)
+        updater.download();   // they clicked Update: go straight on to downloading
+    else if (st == S::ReadyToInstall)
+    {
+        userAskedForUpdate = false;
+        updateButtonClicked();
+    }
+}
+
+void MainComponent::updateButtonClicked()
+{
+    using S = Updater::State;
+    switch (updater.getState())
+    {
+        case S::Checking: case S::Downloading: return;
+        case S::Available: userAskedForUpdate = true; updater.download(); return;
+        case S::ReadyToInstall:
+            askToSaveThen ([this]
+            {
+                if (updater.installAndRestart()) juce::JUCEApplication::getInstance()->quit();
+                else showMessage ("Couldn't update", "The new version couldn't be installed automatically. Download it from github.com/"
+                                                     + juce::String (Updater::repository) + "/releases instead.");
+            });
+            return;
+        case S::Idle: case S::UpToDate: case S::Failed:
+            userAskedForUpdate = true;
+            updater.check();
+            return;
+    }
+}
+
+void MainComponent::mouseUp (const juce::MouseEvent& e)
+{
+    if (e.eventComponent == &timeDisplay && ! e.mouseWasDraggedSinceMouseDown())
+    {
+        ctx.showTime = ! ctx.showTime;
+        timeDisplay.setColour (juce::Label::textColourId, ctx.showTime ? theme::accent2 : theme::accent);
+        timerCallback();
+        timeline.repaint();
+    }
+}
+
+void MainComponent::paintOverChildren (juce::Graphics& g)
+{
+    // the sandstone grain, over everything
+    g.setTiledImageFill (theme::grain(), 0, 0, 1.0f);
+    g.fillAll();
+}
+
 void MainComponent::paint (juce::Graphics& g)
 {
     g.fillAll (theme::bg);
@@ -205,10 +328,9 @@ void MainComponent::resized()
     bpmLabel.setBounds (bar.removeFromLeft (34));    bar.removeFromLeft (4);
     bpm.setBounds (bar.removeFromLeft (110));
 
+    updateButton.setBounds (bar.removeFromRight (128));   bar.removeFromRight (4);
     settingsButton.setBounds (bar.removeFromRight (104)); bar.removeFromRight (6);
     mixdown.setBounds (bar.removeFromRight (96));         bar.removeFromRight (16);
-    addInstrument.setBounds (bar.removeFromRight (110));  bar.removeFromRight (6);
-    addAudio.setBounds (bar.removeFromRight (84));
 
     auto keys = r.removeFromBottom (72).reduced (8, 6);
     keyboardLabel.setBounds (keys.removeFromLeft (120));
@@ -228,9 +350,17 @@ void MainComponent::timerCallback()
     const int bar = (int) (beats / project.beatsPerBar) + 1;
     const int beat = (int) std::fmod (beats, (double) project.beatsPerBar) + 1;
     const double secs = beats * 60.0 / project.bpm;
-    timeDisplay.setText (juce::String (bar).paddedLeft ('0', 3) + "." + juce::String (beat)
-                             + "   " + juce::String ((int) secs / 60) + ":" + juce::String (std::fmod (secs, 60.0), 1).paddedLeft ('0', 4),
-                         juce::dontSendNotification);
+    if (ctx.showTime)
+    {
+        const int ms = (int) (std::fmod (secs, 1.0) * 1000.0);
+        timeDisplay.setText (juce::String ((int) secs / 60) + ":" + juce::String ((int) secs % 60).paddedLeft ('0', 2) + "." + juce::String (ms).paddedLeft ('0', 3),
+                             juce::dontSendNotification);
+    }
+    else
+    {
+        const int sixteenth = (int) (std::fmod (beats, 1.0) * 4.0) + 1;
+        timeDisplay.setText (juce::String (bar).paddedLeft ('0', 3) + "." + juce::String (beat) + "." + juce::String (sixteenth), juce::dontSendNotification);
+    }
 
     playButton.setIcon (engine.isPlaying() ? IconButton::Icon::Pause : IconButton::Icon::Play);
     playButton.setToggleState (engine.isPlaying() && ! engine.isRecording(), juce::dontSendNotification);

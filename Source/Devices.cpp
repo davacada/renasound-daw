@@ -1570,7 +1570,11 @@ private:
         juce::StringArray names;
         tracks.removeIf ([this] (const std::pair<int, juce::String>& t) { return t.first == fx.ownerTrackId.load(); });
         for (auto& t : tracks) names.add (t.second);
-        if (names == lastNames && source.getNumItems() > 0) return;
+        if (names == lastNames && source.getNumItems() > 0)
+        {
+            if (! source.isPopupActive()) source.setSelectedId (fx.sidechainTrackId.load() + 1, juce::dontSendNotification);
+            return;
+        }
         lastNames = names;
         source.clear (juce::dontSendNotification);
         source.addItem ("None", 1);
@@ -1589,11 +1593,440 @@ private:
 juce::AudioProcessorEditor* VocoderFx::createEditor() { return new VocoderEditor (*this); }
 
 // =============================================================================
+//  SAMPLER (instrument): plays any sound across the keyboard
+// =============================================================================
+class SamplerFx : public BuiltinFx
+{
+public:
+    using BuiltinFx::processBlock;
+    struct Sample { juce::AudioBuffer<float> buffer; double rate = 48000.0; juce::String name; juce::File file; };
+    using SamplePtr = std::shared_ptr<const Sample>;
+
+    SamplerFx() : BuiltinFx ("sampler", "Sampler", layout())
+    {
+        formats.registerBasicFormats();
+        current = makeDefaultSound();
+        for (auto& v : voicePos) v = -1.0f;
+    }
+
+    bool acceptsMidi() const override { return true; }
+    double getTailLengthSeconds() const override { return 3.0; }
+
+    static juce::String noteName (int n) { return juce::MidiMessage::getMidiNoteName (n, true, true, 4); }   // C4 = middle C, as in the piano roll
+
+    static APVTS::ParameterLayout layout()
+    {
+        APVTS::ParameterLayout l;
+        l.add (std::make_unique<juce::AudioParameterInt> (juce::ParameterID { "root", 1 }, "Root Note", 0, 127, 60,
+                   juce::AudioParameterIntAttributes().withStringFromValueFunction ([] (int v, int) { return noteName (v); })));
+        l.add (choiceParam ("mode", "Play Mode", { "Keys", "One-shot", "Drum" }, 0));
+        l.add (floatParam ("tune", "Tune", Range (-24, 24, 1), 0, "st"));
+        l.add (floatParam ("fine", "Fine", Range (-100, 100), 0, "ct"));
+        l.add (floatParam ("start", "Start", Range (0, 100), 0, "%"));
+        l.add (floatParam ("end", "End", Range (0, 100), 100, "%"));
+        l.add (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { "loop", 1 }, "Loop", false));
+        l.add (floatParam ("attack", "Attack", skewed (0.5f, 3000, 40), 2, "ms"));
+        l.add (floatParam ("decay", "Decay", skewed (5, 5000, 300), 400, "ms"));
+        l.add (floatParam ("sustain", "Sustain", Range (0, 100), 80, "%"));
+        l.add (floatParam ("release", "Release", skewed (5, 8000, 400), 350, "ms"));
+        l.add (floatParam ("cutoff", "Cutoff", skewed (60, 20000, 1500), 20000, "Hz"));
+        l.add (floatParam ("reso", "Resonance", Range (0, 100), 10, "%"));
+        l.add (floatParam ("velocity", "Velocity", Range (0, 100), 70, "%"));
+        l.add (floatParam ("level", "Level", Range (-24, 6), -3, "dB"));
+        return l;
+    }
+
+    // ---- the sound ----
+    bool loadSample (const juce::File& f)
+    {
+        std::unique_ptr<juce::AudioFormatReader> r (formats.createReaderFor (f));
+        if (r == nullptr || r->lengthInSamples <= 0) return false;
+        auto smp = std::make_shared<Sample>();
+        const int len = (int) std::min<juce::int64> (r->lengthInSamples, (juce::int64) (r->sampleRate * 60.0));
+        smp->buffer.setSize (2, len);
+        r->read (&smp->buffer, 0, len, 0, true, true);
+        if (r->numChannels == 1) smp->buffer.copyFrom (1, 0, smp->buffer, 0, 0, len);
+        smp->rate = r->sampleRate;
+        smp->name = f.getFileNameWithoutExtension();
+        smp->file = f;
+        // a sound named after a note ("Piano C3", "pad_A#2") sets the root note
+        const auto n = f.getFileNameWithoutExtension();
+        for (int note = 127; note >= 0; --note)
+            if (n.containsWholeWordIgnoreCase (noteName (note)) || n.endsWithIgnoreCase ("_" + noteName (note)))
+            {
+                if (auto* p = state.getParameter ("root")) p->setValueNotifyingHost (p->convertTo0to1 ((float) note));
+                break;
+            }
+        setSample (smp);
+        return true;
+    }
+
+    SamplePtr getSample() const { const juce::SpinLock::ScopedLockType sl (sampleLock); return current; }
+    void resetToDefault() { setSample (makeDefaultSound()); }
+
+    void getStateInformation (juce::MemoryBlock& mb) override
+    {
+        auto smp = getSample();
+        state.state.setProperty ("sample", smp != nullptr ? smp->file.getFullPathName() : juce::String(), nullptr);
+        BuiltinFx::getStateInformation (mb);
+    }
+    void setStateInformation (const void* d, int size) override
+    {
+        BuiltinFx::setStateInformation (d, size);
+        const auto path = state.state.getProperty ("sample").toString();
+        if (path.isNotEmpty() && juce::File (path).existsAsFile())
+        {
+            const auto rootBefore = param ("root");
+            loadSample (juce::File (path));
+            if (auto* p = state.getParameter ("root")) p->setValueNotifyingHost (p->convertTo0to1 (rootBefore));   // keep the saved root
+        }
+    }
+
+    void prepareToPlay (double sr, int) override { currentSampleRate = sr; for (auto& v : voices) v.active = false; }
+    void releaseResources() override {}
+
+    void processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi) override
+    {
+        juce::ScopedNoDenormals nd;
+        buffer.clear();
+        const int n = buffer.getNumSamples();
+        if (buffer.getNumChannels() < 2) return;
+        SamplePtr smp;
+        {
+            const juce::SpinLock::ScopedTryLockType sl (sampleLock);
+            if (sl.isLocked()) smp = current;
+        }
+        if (smp == nullptr) return;
+
+        const double sr = currentSampleRate;
+        const float att = coefFor (param ("attack"), sr), dec = coefFor (param ("decay"), sr), rel = coefFor (param ("release"), sr);
+        const float sus = param ("sustain") / 100.0f;
+        const int mode = (int) std::lround (param ("mode"));
+        const float gain = juce::Decibels::decibelsToGain (param ("level"));
+        const float velAmt = param ("velocity") / 100.0f;
+        const int len = smp->buffer.getNumSamples();
+        const double startPos = param ("start") / 100.0 * len;
+        const double endPos = juce::jmax (startPos + 32.0, param ("end") / 100.0 * len);
+        const bool loop = param ("loop") > 0.5f && mode == 0;
+        // filter (Chamberlin state variable, per voice)
+        const float cutoff = juce::jmin (param ("cutoff"), (float) (sr * 0.45));
+        const float fc = 2.0f * std::sin (juce::MathConstants<float>::pi * cutoff / (float) sr);
+        const float q = 1.0f - param ("reso") / 100.0f * 0.92f;
+        const bool filterOn = cutoff < 19000.0f;
+
+        auto* L = buffer.getWritePointer (0);
+        auto* R = buffer.getWritePointer (1);
+        const auto* sL = smp->buffer.getReadPointer (0);
+        const auto* sR = smp->buffer.getReadPointer (1);
+
+        auto it = midi.cbegin();
+        for (int i = 0; i < n; ++i)
+        {
+            while (it != midi.cend() && (*it).samplePosition <= i)
+            {
+                const auto m = (*it).getMessage();
+                if (m.isNoteOn()) startVoice (m.getNoteNumber(), m.getFloatVelocity(), startPos, smp->rate / sr, mode);
+                else if (m.isNoteOff() && mode == 0) { for (auto& v : voices) if (v.active && v.note == m.getNoteNumber()) v.releasing = true; }
+                else if (m.isAllNotesOff() || m.isAllSoundOff()) { for (auto& v : voices) { v.releasing = true; if (m.isAllSoundOff()) v.active = false; } }
+                ++it;
+            }
+            float outL = 0, outR = 0;
+            for (auto& v : voices)
+            {
+                if (! v.active) continue;
+                // envelope: one-shot and drum ignore note-off and play to the end
+                if (v.releasing) v.env += rel * (0.0f - v.env);
+                else if (v.attacking) { v.env += att * (1.05f - v.env); if (v.env >= 1.0f) { v.env = 1.0f; v.attacking = false; } }
+                else v.env += dec * ((mode == 0 ? sus : 0.0f) - v.env) * (mode == 0 ? 1.0f : 0.0f);
+                if (v.releasing && v.env < 1.0e-4f) { v.active = false; continue; }
+
+                if (v.pos >= endPos - 1)
+                {
+                    if (loop) v.pos = startPos + std::fmod (v.pos - startPos, endPos - startPos);
+                    else { v.active = false; continue; }
+                }
+                const int p0 = (int) v.pos;
+                const float fr = (float) (v.pos - p0);
+                const int p1 = juce::jmin (p0 + 1, len - 1);
+                float a = sL[p0] + fr * (sL[p1] - sL[p0]);
+                float b = sR[p0] + fr * (sR[p1] - sR[p0]);
+                // short fade at the end of one-shots to avoid a click
+                const double left = endPos - v.pos;
+                if (! loop && left < 64.0) { a *= (float) (left / 64.0); b *= (float) (left / 64.0); }
+                v.pos += v.step;
+                if (filterOn)
+                {
+                    v.lowL += fc * v.bandL; const float hiL = a - v.lowL - q * v.bandL; v.bandL += fc * hiL; a = v.lowL;
+                    v.lowR += fc * v.bandR; const float hiR = b - v.lowR - q * v.bandR; v.bandR += fc * hiR; b = v.lowR;
+                }
+                const float g = v.env * (1.0f - velAmt + velAmt * v.vel);
+                outL += a * g; outR += b * g;
+            }
+            L[i] = outL * gain;
+            R[i] = outR * gain;
+        }
+        playing = std::any_of (voices.begin(), voices.end(), [] (const Voice& v) { return v.active; });
+        for (size_t k = 0; k < voices.size(); ++k) voicePos[k] = voices[k].active ? (float) (voices[k].pos / juce::jmax (1, len)) : -1.0f;
+    }
+
+    std::atomic<bool> playing { false };
+    std::array<std::atomic<float>, 16> voicePos;   // playback positions for the waveform view
+    std::atomic<int> auditionNote { -1 };
+
+    juce::AudioProcessorEditor* createEditor() override;
+
+private:
+    struct Voice
+    {
+        bool active = false, releasing = false, attacking = true;
+        int note = 60;
+        double pos = 0, step = 1;
+        float env = 0, vel = 1, lowL = 0, bandL = 0, lowR = 0, bandR = 0;
+    };
+    std::array<Voice, 16> voices;
+    SamplePtr current;
+    juce::SpinLock sampleLock;
+    juce::AudioFormatManager formats;
+
+    void setSample (SamplePtr smp)
+    {
+        const juce::SpinLock::ScopedLockType sl (sampleLock);
+        current = std::move (smp);
+        for (auto& v : voices) v.active = false;
+    }
+
+    void startVoice (int note, float vel, double startPos, double rateRatio, int mode)
+    {
+        Voice* v = nullptr;
+        if (mode != 0) for (auto& x : voices) if (x.active && x.note == note) { v = &x; break; }   // drums / one-shots retrigger
+        if (v == nullptr) for (auto& x : voices) if (! x.active) { v = &x; break; }
+        if (v == nullptr) { v = &voices[0]; for (auto& x : voices) if (x.env < v->env) v = &x; }
+        const int root = (int) std::lround (param ("root"));
+        const double semis = mode == 2 ? param ("tune") + param ("fine") / 100.0 : (note - root) + param ("tune") + param ("fine") / 100.0;
+        *v = Voice();
+        v->active = true; v->note = note; v->vel = vel; v->pos = startPos;
+        v->step = rateRatio * std::pow (2.0, semis / 12.0);
+    }
+
+    // a soft electric-piano-like tone, so the Sampler plays something straight away
+    static SamplePtr makeDefaultSound()
+    {
+        auto smp = std::make_shared<Sample>();
+        const double sr = 48000.0, f0 = 261.6256;   // C4
+        const int len = (int) (sr * 2.5);
+        smp->buffer.setSize (2, len);
+        smp->rate = sr;
+        smp->name = "Init: Glass Keys";
+        for (int i = 0; i < len; ++i)
+        {
+            const double t = i / sr;
+            const double env = std::exp (-t * 1.6) * (1.0 - std::exp (-t * 900.0));
+            const double modIdx = 1.8 * std::exp (-t * 6.0);
+            double x = std::sin (juce::MathConstants<double>::twoPi * f0 * t + modIdx * std::sin (juce::MathConstants<double>::twoPi * f0 * 2.0 * t));
+            x += 0.18 * std::sin (juce::MathConstants<double>::twoPi * f0 * 3.0 * t) * std::exp (-t * 4.0);
+            x += 0.08 * std::sin (juce::MathConstants<double>::twoPi * f0 * 7.02 * t) * std::exp (-t * 9.0);
+            const float y = (float) (x * env * 0.55);
+            smp->buffer.setSample (0, i, y);
+            smp->buffer.setSample (1, i, (float) (y * 0.96 + 0.04 * std::sin (juce::MathConstants<double>::twoPi * f0 * 1.003 * t) * env * 0.55));
+        }
+        return smp;
+    }
+};
+
+class SamplerEditor : public FaceEditor, public juce::FileDragAndDropTarget, public juce::DragAndDropTarget
+{
+public:
+    explicit SamplerEditor (SamplerFx& p)
+        : FaceEditor (p, { KnobStyle::Glossy, juce::Colour (0xff2b2a27), juce::Colour (0xff9dffcf), juce::Colour (0xff3fe0a0), juce::Colour (0xff2c2b28),
+                           juce::Colour (0xffe8e4da), juce::Colour (0xff8d887c), juce::Colour (0xff161614), juce::Colour (0xffd9ffe9) }),
+          fx (p), mode (p, "mode")
+    {
+        for (auto [id, name] : { std::pair { "root", "ROOT" }, { "tune", "TUNE" }, { "fine", "FINE" }, { "attack", "ATTACK" }, { "decay", "DECAY" },
+                                 { "sustain", "SUSTAIN" }, { "release", "RELEASE" }, { "cutoff", "CUTOFF" }, { "reso", "RESO" }, { "velocity", "VELOCITY" }, { "level", "LEVEL" } })
+        {
+            auto* k = knobs.add (new Knob (p, id, name, 58));
+            k->label.setColour (juce::Label::textColourId, look.s.textDim);
+            addAndMakeVisible (k);
+        }
+        for (auto* b : { &loadButton, &defaultButton, &loopButton })
+        {
+            addAndMakeVisible (*b);
+            b->setColour (juce::TextButton::textColourOffId, look.s.text);
+        }
+        loopButton.setClickingTogglesState (true);
+        loopAttach = std::make_unique<APVTS::ButtonAttachment> (p.state, "loop", loopButton);
+        loadButton.onClick = [this]
+        {
+            chooser = std::make_unique<juce::FileChooser> ("Load a sound into the Sampler", juce::File::getSpecialLocation (juce::File::userMusicDirectory), "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.ogg");
+            chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                                  [this] (const juce::FileChooser& fc) { if (fc.getResult().existsAsFile()) load (fc.getResult()); });
+        };
+        defaultButton.onClick = [this] { fx.resetToDefault(); repaint(); };
+        defaultButton.setTooltip ("Back to the built-in Glass Keys sound");
+        addAndMakeVisible (mode);
+        setSize (780, 440);
+        startTimerHz (30);
+    }
+
+    // drop a file from Finder / Explorer, or a sound from RENASOUND's Library
+    bool isInterestedInFileDrag (const juce::StringArray&) override { return true; }
+    void filesDropped (const juce::StringArray& files, int, int) override { if (! files.isEmpty()) load (juce::File (files[0])); }
+    bool isInterestedInDragSource (const SourceDetails&) override { return true; }
+    void itemDropped (const SourceDetails& d) override
+    {
+        const auto first = d.description.toString().upToFirstOccurrenceOf ("\n", false, false);
+        if (juce::File::isAbsolutePath (first)) load (juce::File (first));
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        auto r = getLocalBounds().toFloat();
+        juce::ColourGradient bg (juce::Colour (0xff353430), 0, 0, juce::Colour (0xff1f1e1c), 0, r.getHeight(), false);
+        g.setGradientFill (bg);
+        g.fillAll();
+        // brushed lines and rack ears
+        g.setColour (juce::Colours::white.withAlpha (0.02f));
+        for (int y = 0; y < getHeight(); y += 3) g.drawHorizontalLine (y, 0, r.getWidth());
+        for (float x : { 10.0f, r.getWidth() - 22.0f })
+            for (float y : { 18.0f, r.getHeight() - 30.0f })
+            {
+                g.setColour (juce::Colour (0xff141412)); g.fillEllipse (x, y, 12, 12);
+                g.setColour (juce::Colour (0xff4a4844)); g.drawEllipse (x, y, 12, 12, 1.0f);
+            }
+
+        g.setColour (look.s.text);
+        g.setFont (theme::font (21.0f, true));
+        g.drawText ("SAMPLER", 40, 12, 200, 30, juce::Justification::centredLeft);
+        g.setColour (look.s.arc);
+        g.fillEllipse (150, 24, 7, 7);
+        g.setColour (look.s.textDim);
+        g.setFont (theme::font (11.0f, true));
+        g.drawText ("16 VOICE  /  DROP ANY SOUND", 166, 19, 240, 16, juce::Justification::centredLeft);
+
+        // the LCD with the waveform
+        auto lcd = display.toFloat();
+        g.setColour (juce::Colour (0xff0c1a14));
+        g.fillRoundedRectangle (lcd, 6.0f);
+        g.setColour (juce::Colour (0xff1d3a2c));
+        g.drawRoundedRectangle (lcd, 6.0f, 1.5f);
+        auto plot = lcd.reduced (12, 22);
+        auto smp = fx.getSample();
+        if (smp != nullptr)
+        {
+            const auto& b = smp->buffer;
+            const int len = b.getNumSamples(), cols = (int) plot.getWidth();
+            const float s0 = fx.param ("start") / 100.0f, s1 = fx.param ("end") / 100.0f;
+            for (int x = 0; x < cols; ++x)
+            {
+                const int a = (int) ((double) x / cols * len), e = juce::jmax (a + 1, (int) ((double) (x + 1) / cols * len));
+                const auto mm = b.findMinMax (0, a, juce::jmin (e, len) - a);
+                const float t = (float) x / (float) cols;
+                const bool inside = t >= s0 && t <= s1;
+                g.setColour (look.s.arc.withAlpha (inside ? 0.9f : 0.25f));
+                g.drawVerticalLine ((int) plot.getX() + x, plot.getCentreY() - mm.getEnd() * plot.getHeight() * 0.5f,
+                                    plot.getCentreY() - mm.getStart() * plot.getHeight() * 0.5f + 1.0f);
+            }
+            for (auto [t, label] : { std::pair { s0, "S" }, { s1, "E" } })
+            {
+                const float x = plot.getX() + t * plot.getWidth();
+                g.setColour (look.s.pointer);
+                g.drawVerticalLine ((int) x, plot.getY() - 6, plot.getBottom() + 6);
+                g.setFont (theme::font (10.0f, true));
+                g.drawText (label, juce::Rectangle<float> (x - 6, lcd.getY() + 4, 12, 12), juce::Justification::centred);
+            }
+            for (auto& vp : fx.voicePos)
+                if (const float v = vp.load(); v >= 0)
+                {
+                    g.setColour (juce::Colours::white.withAlpha (0.8f));
+                    g.drawVerticalLine ((int) (plot.getX() + v * plot.getWidth()), plot.getY(), plot.getBottom());
+                }
+            g.setColour (look.s.pointer);
+            g.setFont (juce::Font (juce::FontOptions (juce::Font::getDefaultMonospacedFontName(), 13.0f, juce::Font::bold)));
+            g.drawText (smp->name + "   " + juce::String (len / smp->rate, 2) + " s   root " + SamplerFx::noteName ((int) std::lround (fx.param ("root"))),
+                        lcd.reduced (12, 4).removeFromBottom (16), juce::Justification::centredLeft);
+        }
+        if (dragOver)
+        {
+            g.setColour (look.s.arc.withAlpha (0.15f));
+            g.fillRoundedRectangle (lcd, 6.0f);
+        }
+    }
+
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced (36, 12);
+        r.removeFromTop (36);
+        auto top = r.removeFromTop (150);
+        auto side = top.removeFromRight (150);
+        display = top.withTrimmedRight (12);
+        loadButton.setBounds (side.removeFromTop (34));
+        side.removeFromTop (6);
+        defaultButton.setBounds (side.removeFromTop (28));
+        side.removeFromTop (6);
+        loopButton.setBounds (side.removeFromTop (28));
+        r.removeFromTop (12);
+        mode.setBounds (r.removeFromTop (28).removeFromLeft (300));
+        r.removeFromTop (10);
+        auto row1 = r.removeFromTop (r.getHeight() / 2);
+        const int w = r.getWidth() / 6;
+        for (int i = 0; i < 6; ++i) knobs[i]->setBounds (row1.removeFromLeft (w).reduced (3, 0));
+        r.removeFromLeft (w / 2);
+        for (int i = 6; i < knobs.size(); ++i) knobs[i]->setBounds (r.removeFromLeft (w).reduced (3, 0));
+    }
+
+    // drag the S / E markers
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        if (! display.contains (e.getPosition())) return;
+        const float t = juce::jlimit (0.0f, 1.0f, (float) (e.x - display.getX() - 12) / (float) (display.getWidth() - 24));
+        dragId = std::abs (t - fx.param ("start") / 100.0f) < std::abs (t - fx.param ("end") / 100.0f) ? "start" : "end";
+        if (auto* p = fx.state.getParameter (dragId)) p->beginChangeGesture();
+        mouseDrag (e);
+    }
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        if (dragId.isEmpty()) return;
+        const float t = juce::jlimit (0.0f, 1.0f, (float) (e.x - display.getX() - 12) / (float) (display.getWidth() - 24));
+        if (auto* p = fx.state.getParameter (dragId)) p->setValueNotifyingHost (p->convertTo0to1 (t * 100.0f));
+        repaint();
+    }
+    void mouseUp (const juce::MouseEvent&) override
+    {
+        if (auto* p = fx.state.getParameter (dragId)) p->endChangeGesture();
+        dragId.clear();
+    }
+    void fileDragEnter (const juce::StringArray&, int, int) override { dragOver = true; repaint(); }
+    void fileDragExit (const juce::StringArray&) override { dragOver = false; repaint(); }
+
+private:
+    SamplerFx& fx;
+    Switch mode;
+    juce::OwnedArray<Knob> knobs;
+    juce::TextButton loadButton { "Load sound..." }, defaultButton { "Glass Keys" }, loopButton { "Loop" };
+    std::unique_ptr<APVTS::ButtonAttachment> loopAttach;
+    std::unique_ptr<juce::FileChooser> chooser;
+    juce::Rectangle<int> display;
+    juce::String dragId;
+    bool dragOver = false;
+
+    void load (const juce::File& f)
+    {
+        dragOver = false;
+        if (! fx.loadSample (f))
+            juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::NoIcon, "Couldn't load that sound", f.getFileName() + " isn't an audio file RENASOUND can read.");
+        repaint();
+    }
+};
+
+juce::AudioProcessorEditor* SamplerFx::createEditor() { return new SamplerEditor (*this); }
+
+// =============================================================================
 const std::vector<BuiltinFxInfo>& getBuiltinInstrumentList()
 {
     static const std::vector<BuiltinFxInfo> list {
         { "kick",    "Kick Synth", "Synthesised kicks: big room, 808, techno" },
-        { "vocoder", "Vocoder",    "Play chords through your vocal (pick the vocal track as modulator)" } };
+        { "vocoder", "Vocoder",    "Play chords through your vocal (pick the vocal track as modulator)" },
+        { "sampler", "Sampler",    "Play any sound across the keyboard: drop a file or a Library sound on it" } };
     return list;
 }
 
@@ -1602,5 +2035,6 @@ std::unique_ptr<BuiltinFx> createAmp()       { return std::make_unique<AmpFx>();
 std::unique_ptr<BuiltinFx> createPunch()     { return std::make_unique<PunchFx>(); }
 std::unique_ptr<BuiltinFx> createKickSynth() { return std::make_unique<KickSynthFx>(); }
 std::unique_ptr<BuiltinFx> createVocoder()   { return std::make_unique<VocoderFx>(); }
+std::unique_ptr<BuiltinFx> createSampler()   { return std::make_unique<SamplerFx>(); }
 
 } // namespace rs

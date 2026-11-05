@@ -14,6 +14,7 @@ struct AppContext
     AudioEngine& engine;
 
     int selectedTrackId = -1;
+    bool showTime = false;   // clock and ruler: minutes:seconds instead of bars and beats
     int selectedClipId = -1;
 
     std::function<void()> onSelectionChanged;      // views listen to this
@@ -69,8 +70,12 @@ public:
     {
         auto r = getLocalBounds().toFloat().reduced (1.0f);
         const bool on = getToggleState();
-        g.setColour (on ? onColour.withAlpha (0.25f) : (down ? theme::panelHi.brighter (0.1f) : over ? theme::panelHi.brighter (0.05f) : theme::panelHi));
-        g.fillRoundedRectangle (r, 6.0f);
+        // borderless: only a wash on hover, a tint when on
+        if (on || down || over)
+        {
+            g.setColour (on ? onColour.withAlpha (0.2f) : theme::text.withAlpha (down ? 0.1f : 0.055f));
+            g.fillRoundedRectangle (r, 6.0f);
+        }
 
         auto c = on ? onColour : theme::text;
         if (icon == Icon::Record) c = on ? juce::Colours::white : theme::record;
@@ -103,7 +108,7 @@ public:
             case Icon::Metronome:
                 p.addTriangle (ir.getCentreX(), ir.getY() - 1, ir.getX(), ir.getBottom(), ir.getRight(), ir.getBottom());
                 g.fillPath (p);
-                g.setColour (on ? theme::panel : theme::panelHi);
+                g.setColour (theme::panel);
                 g.drawLine (ir.getCentreX(), ir.getBottom() - 2, ir.getRight() + 1, ir.getY(), 2.0f);
                 g.setColour (c);
                 g.drawLine (ir.getCentreX(), ir.getBottom() - 2, ir.getRight() + 1, ir.getY(), 1.5f);
