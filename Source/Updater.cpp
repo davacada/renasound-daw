@@ -111,21 +111,57 @@ bool Updater::installAndRestart()
     // the .app bundle we're running from
     auto app = juce::File::getSpecialLocation (juce::File::currentApplicationFile);
     auto script = downloaded.getSiblingFile ("install.sh");
-    script.replaceWithText (
-        "#!/bin/bash\n"
-        "APP=\"$1\"; DMG=\"$2\"; PID=\"$3\"\n"
-        "while kill -0 \"$PID\" 2>/dev/null; do sleep 0.3; done\n"
-        "MNT=$(mktemp -d)\n"
-        "hdiutil attach -nobrowse -quiet -mountpoint \"$MNT\" \"$DMG\" || exit 1\n"
-        "rm -rf \"$APP.previous\"\n"
-        "if mv \"$APP\" \"$APP.previous\" && ditto \"$MNT/RENASOUND.app\" \"$APP\"; then rm -rf \"$APP.previous\";\n"
-        "else rm -rf \"$APP\"; mv \"$APP.previous\" \"$APP\"; fi\n"
-        "hdiutil detach -quiet \"$MNT\"\n"
-        "xattr -dr com.apple.quarantine \"$APP\" 2>/dev/null\n"
-        "open \"$APP\"\n");
+    // Runs after RENASOUND has quit: swaps in the new app and opens it. Every step goes to
+    // ~/Library/Logs/RENASOUND Update.log; if the swap can't be done, the installer window opens
+    // so the new version can be dragged into Applications by hand, and the old app reopens.
+    script.replaceWithText (R"SH(#!/bin/bash
+APP="$1"; DMG="$2"; PID="$3"
+LOG="$HOME/Library/Logs/RENASOUND Update.log"
+mkdir -p "$HOME/Library/Logs"
+exec >>"$LOG" 2>&1
+echo "---- $(date) update: app=$APP dmg=$DMG pid=$PID"
+
+# wait (up to a minute) for RENASOUND to quit
+for i in $(seq 1 200); do kill -0 "$PID" 2>/dev/null || break; sleep 0.3; done
+
+# an app macOS is running from a temporary copy (App Translocation) can't be replaced in place:
+# put the new one in Applications instead
+case "$APP" in */AppTranslocation/*) APP="/Applications/RENASOUND.app"; echo "translocated: using $APP";; esac
+DEST_DIR="$(dirname "$APP")"
+if [ ! -w "$DEST_DIR" ]; then echo "can't write to $DEST_DIR"; fi
+
+manual() {
+  echo "falling back to the installer window: $1"
+  open "$DMG"
+  [ -d "$APP" ] && open "$APP"
+  exit 1
+}
+
+MNT="$(mktemp -d /tmp/renasound-update.XXXXXX)"
+hdiutil attach -nobrowse -noautoopen -mountpoint "$MNT" "$DMG" || manual "couldn't open the download"
+[ -d "$MNT/RENASOUND.app" ] || { hdiutil detach -quiet "$MNT"; manual "no RENASOUND.app in the download"; }
+
+# copy the new app next to the old one first, then swap them
+rm -rf "$APP.new" "$APP.previous"
+if ! ditto "$MNT/RENASOUND.app" "$APP.new"; then
+  rm -rf "$APP.new"; hdiutil detach -quiet "$MNT"; manual "couldn't copy the new app to $DEST_DIR"
+fi
+hdiutil detach -quiet "$MNT"
+if [ -d "$APP" ] && ! mv "$APP" "$APP.previous"; then
+  rm -rf "$APP.new"; manual "couldn't move the old app aside"
+fi
+if ! mv "$APP.new" "$APP"; then
+  [ -d "$APP.previous" ] && mv "$APP.previous" "$APP"
+  manual "couldn't put the new app in place"
+fi
+rm -rf "$APP.previous"
+xattr -dr com.apple.quarantine "$APP" 2>/dev/null
+echo "installed, opening $APP"
+open "$APP"
+)SH");
     script.setExecutePermission (true);
-    const auto cmd = "nohup /bin/bash " + script.getFullPathName().quoted() + " " + app.getFullPathName().quoted() + " "
-                   + downloaded.getFullPathName().quoted() + " " + pid + " >/dev/null 2>&1 &";
+    const auto cmd = "/usr/bin/nohup /bin/bash " + script.getFullPathName().quoted() + " " + app.getFullPathName().quoted() + " "
+                   + downloaded.getFullPathName().quoted() + " " + pid + " </dev/null >/dev/null 2>&1 &";
     return std::system (cmd.toRawUTF8()) == 0;
    #elif JUCE_WINDOWS
     // unpack the new exe next to the download, then swap it in once we've quit
