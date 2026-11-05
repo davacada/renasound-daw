@@ -60,6 +60,11 @@ void devicemenus::showInstrumentMenu (AppContext& ctx, int trackId, juce::Compon
     if (track == nullptr || track->type != Track::Type::Instrument) return;
 
     juce::PopupMenu menu;
+    menu.addItem ("Open " + AppContext::instrumentName (*track) + " window", [&ctx, track]
+    {
+        if (ctx.openDevice) ctx.openDevice (track->id, track->instrument, true);
+    });
+    menu.addSeparator();
     menu.addSectionHeader ("RENASOUND SYNTH");
     const auto& presets = getSynthPresets();
     for (int i = 0; i < (int) presets.size(); ++i)

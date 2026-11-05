@@ -6,6 +6,11 @@ A Mixcraft-style music DAW for **macOS and Windows**, written in C++ with JUCE.
 
 ![RENASOUND](docs/screenshot.png)
 
+## What's new in 0.7.1
+
+- **Instrument picker on every instrument track**: the instrument's name sits under the track name; click it to choose a RENASOUND synth sound, a drum kit (including your own kits), Kick Synth, Vocoder or a plugin, or to open the instrument's window. **+ Instrument** asks which instrument the new track should play.
+- **Your sample packs in the Library**: kit folders (e.g. a "Renasound kits" folder in Music, Documents or Documents/Music) appear in the Library automatically, and the folder menu lists each subfolder (Kicks, Congas, Shakers...) so you can browse by type. Drag any sound onto the timeline.
+
 ## What's new in 0.7: five new devices, each with its own faceplate, and your own drum kits
 
 ![The new devices](docs/devices.png)

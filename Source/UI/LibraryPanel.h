@@ -27,7 +27,9 @@ private:
     juce::TextEditor search;
     juce::TextButton addFolder { "Add folder..." }, showFolder { "Show recordings" }, stopButton { "Stop preview" };
     juce::ComboBox folderBox;
-    juce::Array<juce::File> folders;
+    juce::Array<juce::File> folders;           // [0] recordings, then added folders, then kit folders
+    int numSavedFolders = 0;                    // folders[1 .. numSavedFolders] were added by the user
+    juce::Array<juce::File> filterDirs;         // what each folder-menu entry (id 2+) shows
     std::vector<Item> allItems, shown;
     std::unique_ptr<juce::FileChooser> chooser;
     std::unique_ptr<juce::PropertiesFile> settings;

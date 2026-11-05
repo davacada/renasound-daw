@@ -306,6 +306,13 @@ public:
         solo.setTooltip ("Solo");
         arm.setTooltip ("Arm for recording");
 
+        if (track->type == Track::Type::Instrument)
+        {
+            addAndMakeVisible (instrumentPicker);
+            instrumentPicker.setTooltip ("Choose this track's instrument");
+            instrumentPicker.onClick = [this] { devicemenus::showInstrumentMenu (owner.ctx, track->id, &instrumentPicker); };
+        }
+
         addAndMakeVisible (autoButton);
         autoButton.setTooltip ("Automation: show or hide this track's lanes (right-click to add a lane)");
         autoButton.onClick = [this]
@@ -365,6 +372,11 @@ public:
             volume.setValue (av >= 0 ? av : track->volume, juce::dontSendNotification);
         if (! pan.isMouseButtonDown())
             pan.setValue (ap >= -1.0f ? ap : track->pan, juce::dontSendNotification);
+        if (track->type == Track::Type::Instrument)
+        {
+            const auto name = AppContext::instrumentName (*track);
+            if (name != instrumentPicker.text) { instrumentPicker.text = name; instrumentPicker.repaint(); }
+        }
         const bool hasLanes = ! track->automation.empty();
         autoButton.setColour (juce::TextButton::buttonColourId, hasLanes ? theme::accent.withAlpha (0.35f) : theme::panelHi);
         for (auto* lh : laneHeaders) lh->repaint();
@@ -390,6 +402,8 @@ public:
         mute.setBounds (row.removeFromRight (24)); row.removeFromRight (4);
         pan.setBounds (row.removeFromRight (26).expanded (0, 2)); row.removeFromRight (2);
         volume.setBounds (row.withTrimmedRight (2));
+        if (track->type == Track::Type::Instrument)
+            instrumentPicker.setBounds (r.removeFromBottom (18).withWidth (juce::jmin (r.getWidth(), 170)));
     }
 
     void paint (juce::Graphics& g) override
@@ -430,12 +444,6 @@ public:
         g.setFont (theme::font (14.0f, true));
         g.drawText (track->name, top, juce::Justification::centredLeft, true);
 
-        if (track->type == Track::Type::Instrument)
-        {
-            g.setColour (theme::textDim);
-            g.setFont (theme::font (11.5f));
-            g.drawText (AppContext::instrumentName (*track), r.removeFromBottom (16), juce::Justification::centredLeft, true);
-        }
 
         // meter
         auto m = mainArea.withLeft (mainArea.getRight() - 6).reduced (1, 8);
@@ -490,6 +498,26 @@ public:
     juce::Viewport insertView;
     InsertList inserts;
     juce::Slider volume, pan;
+
+    // the instrument's name as a pill with an arrow; click to choose another
+    struct InstrumentPicker : juce::Button
+    {
+        InstrumentPicker() : juce::Button ("instrument") {}
+        juce::String text;
+        void paintButton (juce::Graphics& g, bool over, bool down) override
+        {
+            auto r = getLocalBounds().toFloat().reduced (0.5f);
+            g.setColour (down ? theme::accent.withAlpha (0.35f) : over ? theme::grid.brighter (0.25f) : theme::grid);
+            g.fillRoundedRectangle (r, 4.0f);
+            g.setColour (over ? theme::text : theme::textDim);
+            g.setFont (theme::font (11.5f, true));
+            g.drawText (text, r.withTrimmedLeft (8).withTrimmedRight (18), juce::Justification::centredLeft, true);
+            juce::Path arrow;
+            const float cx = r.getRight() - 10, cy = r.getCentreY();
+            arrow.addTriangle (cx - 4, cy - 2, cx + 4, cy - 2, cx, cy + 3);
+            g.fillPath (arrow);
+        }
+    } instrumentPicker;
 };
 
 // =============================================================================

@@ -491,8 +491,24 @@ juce::Array<juce::File> DrumMachine::getKitFolders()
 {
     juce::Array<juce::File> out;
     auto addIf = [&out] (const juce::File& f) { if (f.isDirectory() && ! out.contains (f)) out.add (f); };
-    addIf (juce::File::getSpecialLocation (juce::File::userMusicDirectory).getChildFile ("RENASOUND Kits"));
-    addIf (juce::File::getSpecialLocation (juce::File::userDocumentsDirectory).getChildFile ("RENASOUND Kits"));
+    // the usual places, matched loosely ("Renasound kits", "RENASOUND Kits", a "Music " folder inside Documents...)
+    auto childNamed = [] (const juce::File& parent, std::initializer_list<const char*> names)
+    {
+        juce::Array<juce::File> found;
+        if (parent.isDirectory())
+            for (const auto& e : juce::RangedDirectoryIterator (parent, false, "*", juce::File::findDirectories))
+                for (auto* n : names)
+                    if (e.getFile().getFileName().trim().equalsIgnoreCase (n)) found.add (e.getFile());
+        return found;
+    };
+    const auto music = juce::File::getSpecialLocation (juce::File::userMusicDirectory);
+    const auto docs = juce::File::getSpecialLocation (juce::File::userDocumentsDirectory);
+    juce::Array<juce::File> parents { music, docs };
+    for (auto& f : childNamed (docs, { "Music" })) parents.add (f);
+    for (auto& f : childNamed (music, { "Renasound" })) parents.add (f);
+    for (auto& p : parents)
+        for (auto& f : childNamed (p, { "Renasound kits", "Renasound kit", "Kits" }))
+            if (p != music && p != docs ? true : ! f.getFileName().equalsIgnoreCase ("Kits")) addIf (f);
     juce::StringArray lines;
     lines.addLines (kitFolderList().loadFileAsString());
     for (auto& l : lines)

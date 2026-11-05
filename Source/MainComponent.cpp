@@ -58,7 +58,12 @@ MainComponent::MainComponent()
     for (auto* b : { &addAudio, &addInstrument, &mixdown, &settingsButton })
         addAndMakeVisible (b);
     addAudio.onClick      = [this] { addTrack (Track::Type::Audio); };
-    addInstrument.onClick = [this] { addTrack (Track::Type::Instrument); };
+    addInstrument.onClick = [this]
+    {
+        addTrack (Track::Type::Instrument);
+        // straight away: which instrument should the new track play?
+        if (! project.tracks.empty()) devicemenus::showInstrumentMenu (ctx, project.tracks.back()->id, &addInstrument);
+    };
     mixdown.onClick       = [this] { exportMixdown(); };
     settingsButton.onClick = [this] { showAudioSettings(); };
     addAudio.setTooltip ("Add an audio track for recording or loops");
