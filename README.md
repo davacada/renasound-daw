@@ -6,6 +6,11 @@ A Mixcraft-style music DAW for **macOS and Windows**, written in C++ with JUCE.
 
 ![RENASOUND](docs/screenshot.png)
 
+## What's new in 0.11.1
+
+- An instrument or effect always opens in its one window, which stays above RENASOUND (but not above other apps).
+- Opening an instrument makes the keyboard play it, and the computer keyboard (musical typing) and shortcuts keep working while its window is in front.
+
 ## What's new in 0.11
 
 - **RENASYNTH**, RENASOUND's own synth, on every instrument track: two oscillators (sine, triangle, saw, square, noise, each with a shape control), sub and noise, up to 7 unison voices with detune and stereo width, glide, a resonant filter (24 / 12 dB low-pass, high-pass, band-pass) with drive, key tracking and its own envelope, an amp envelope, and an LFO for pitch, filter, volume, shape or pan. Twelve starting sounds. Its panel draws everything live: the waveforms, the voices fanning out, the filter curve moving with the envelope, the envelopes (drag their points), the LFO and the output. Older projects keep their sound.

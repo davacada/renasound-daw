@@ -21,6 +21,8 @@ struct AppContext
     int selectedClipId = -1;
 
     std::function<void()> onSelectionChanged;      // views listen to this
+    // the shortcuts and the musical typing, so they also work while a device window has the focus
+    std::vector<juce::KeyListener*> keyListeners;
     std::function<void (int clipId)> openEditor;   // double-click a MIDI clip
     std::function<void (int trackId)> renameTrack;
     std::function<void (int trackId, FxPtr slot, bool instrument)> openDevice;   // a device's editor window

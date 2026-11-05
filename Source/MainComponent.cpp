@@ -215,6 +215,8 @@ MainComponent::MainComponent()
     commandManager.registerAllCommandsForTarget (this);
     addKeyListener (commandManager.getKeyMappings());
     addKeyListener (&typing);   // added last, so it hears keys before the shortcuts
+    commandManager.setFirstCommandTarget (this);
+    ctx.keyListeners = { commandManager.getKeyMappings(), &typing };   // device windows listen too
     setWantsKeyboardFocus (true);
 
     // start with something to play with, like a fresh Mixcraft project
@@ -486,6 +488,10 @@ void MainComponent::addTrack (Track::Type type)
 
 void MainComponent::openDevice (int trackId, FxPtr slot, bool instrument)
 {
+    // opening an instrument makes the keyboard (on screen, computer, MIDI) play it
+    if (instrument && trackId >= 0) ctx.selectTrack (trackId);
+
+    // a device always has one window: bring it back rather than opening another
     for (auto& w : deviceWindows)
         if (w->shows (trackId, slot, instrument)) { w->setVisible (true); w->toFront (true); return; }
 

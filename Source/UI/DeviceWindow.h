@@ -10,7 +10,8 @@ namespace rs
 //  the mixer's channel strips.
 // =============================================================================
 class DeviceWindow : public juce::DocumentWindow,
-                     public juce::ChangeListener
+                     public juce::ChangeListener,
+                     private juce::Timer
 {
 public:
     // slot == nullptr with instrument == true shows the built-in synth's sounds
@@ -19,6 +20,7 @@ public:
 
     void closeButtonPressed() override { if (onClose) onClose(); }
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
+    void timerCallback() override;   // floats above RENASOUND while RENASOUND is the app in front
 
     bool shows (int t, const FxPtr& s, bool instrument) const { return t == trackId && s == slot && instrument == isInstrument; }
 

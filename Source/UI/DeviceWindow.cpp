@@ -424,14 +424,25 @@ DeviceWindow::DeviceWindow (AppContext& c, int track, FxPtr s, bool instrument)
     setUsingNativeTitleBar (true);
     setContentOwned (new Content (ctx, trackId, slot, isInstrument), true);
     setResizable (false, false);
-    setAlwaysOnTop (false);
     centreWithSize (getWidth(), getHeight());
     setVisible (true);
     ctx.project.addChangeListener (this);
+    for (auto* l : ctx.keyListeners) addKeyListener (l);   // play the keyboard and use shortcuts from here too
+    timerCallback();
+    startTimerHz (4);
+}
+
+void DeviceWindow::timerCallback()
+{
+    // stays above the RENASOUND window, but not above other apps
+    const bool front = juce::Process::isForegroundProcess();
+    if (isAlwaysOnTop() != front) setAlwaysOnTop (front);
 }
 
 DeviceWindow::~DeviceWindow()
 {
+    stopTimer();
+    for (auto* l : ctx.keyListeners) removeKeyListener (l);
     ctx.project.removeChangeListener (this);
     clearContentComponent();
 }
@@ -440,7 +451,9 @@ void DeviceWindow::updateTitle()
 {
     auto track = ctx.project.findTrack (trackId);
     const auto owner = track != nullptr ? track->name : juce::String ("Master");
-    const auto device = slot != nullptr ? slot->getName() : juce::String ("RENASOUND Synth");
+    juce::String device = slot != nullptr ? slot->getName() : juce::String ("RENASOUND Synth");
+    if (slot != nullptr && slot->processor != nullptr)
+        if (auto n = getSynthPatchName (slot->processor.get()); n.isNotEmpty()) device = "RENASYNTH  /  " + n;
     setName (owner + " - " + device);
 }
 
