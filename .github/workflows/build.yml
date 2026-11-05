@@ -1,0 +1,76 @@
+# Builds RENASOUND for macOS and Windows on every push to main, and publishes
+# the installers as the "Latest build" release:
+#   macOS:   RENASOUND-macOS.dmg  (open it, drag RENASOUND to Applications)
+#   Windows: RENASOUND-Windows.zip (unzip, run RENASOUND.exe)
+name: Build
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            file: RENASOUND-macOS.dmg
+          - os: windows-latest
+            file: RENASOUND-Windows.zip
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64"
+
+      - name: Build
+        run: cmake --build build --config Release --parallel --target Renasound
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          APP=build/Renasound_artefacts/Release/RENASOUND.app
+          # ad-hoc signature so Apple Silicon Macs will run it
+          codesign --force --deep --sign - "$APP"
+          mkdir dmg
+          cp -R "$APP" dmg/
+          ln -s /Applications dmg/Applications
+          hdiutil create -volname RENASOUND -srcfolder dmg -ov -format UDZO RENASOUND-macOS.dmg
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path build/Renasound_artefacts/Release/RENASOUND.exe -DestinationPath RENASOUND-Windows.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.file }}
+          path: ${{ matrix.file }}
+
+  release:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest build
+          prerelease: false
+          make_latest: true
+          body: |
+            RENASOUND built from ${{ github.sha }}.
+
+            **Mac:** download RENASOUND-macOS.dmg, open it and drag RENASOUND into Applications. The first time, right-click RENASOUND, choose Open, then Open again (the app isn't signed with an Apple developer certificate yet).
+            **Windows:** download RENASOUND-Windows.zip, unzip it and run RENASOUND.exe (if SmartScreen warns, choose More info, then Run anyway).
+          files: out/*
