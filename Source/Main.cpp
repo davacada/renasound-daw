@@ -1,4 +1,40 @@
 #include "MainComponent.h"
+#if JUCE_WINDOWS
+ #define NOMINMAX
+ #include <windows.h>
+ #include <shlobj.h>
+#endif
+
+// Windows: .renasound files get RENASOUND's document icon and open in RENASOUND.
+// (The app is a single .exe you can keep anywhere, so it registers itself for the current user.)
+static void registerProjectFiles()
+{
+   #if JUCE_WINDOWS
+    using Reg = juce::WindowsRegistry;
+    const auto exe = juce::File::getSpecialLocation (juce::File::currentExecutableFile);
+    auto icon = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+                    .getChildFile ("Renasound").getChildFile ("RenasoundDocument.ico");
+    if (! icon.existsAsFile() || icon.getSize() != (juce::int64) BinaryData::RenasoundDocument_icoSize)
+    {
+        icon.getParentDirectory().createDirectory();
+        icon.replaceWithData (BinaryData::RenasoundDocument_ico, (size_t) BinaryData::RenasoundDocument_icoSize);
+    }
+
+    const juce::String root = "HKEY_CURRENT_USER\\Software\\Classes\\";
+    const auto command = exe.getFullPathName().quoted() + " \"%1\"";
+    const auto iconValue = icon.getFullPathName();
+    if (Reg::getValue (root + "RENASOUND.Project\\shell\\open\\command\\") == command
+        && Reg::getValue (root + "RENASOUND.Project\\DefaultIcon\\") == iconValue
+        && Reg::getValue (root + ".renasound\\") == "RENASOUND.Project")
+        return;   // already set up for this copy of the app
+
+    Reg::setValue (root + ".renasound\\", "RENASOUND.Project");
+    Reg::setValue (root + "RENASOUND.Project\\", "RENASOUND Project");
+    Reg::setValue (root + "RENASOUND.Project\\DefaultIcon\\", iconValue);
+    Reg::setValue (root + "RENASOUND.Project\\shell\\open\\command\\", command);
+    SHChangeNotify (SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);   // refresh icons in Explorer
+   #endif
+}
 
 class RenasoundApplication : public juce::JUCEApplication
 {
@@ -10,6 +46,7 @@ public:
     void initialise (const juce::String& commandLine) override
     {
         mainWindow = std::make_unique<MainWindow>();
+        registerProjectFiles();
 
         // opening a .renasound file from Finder / Explorer
         auto path = commandLine.unquoted().trim();

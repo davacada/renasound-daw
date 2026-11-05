@@ -234,7 +234,14 @@ void MainComponent::updaterChanged()
 {
     using S = Updater::State;
     const auto st = updater.getState();
-    juce::String label = "Update";
+   #ifdef JUCE_APPLICATION_VERSION_STRING
+    const juce::String version = JUCE_APPLICATION_VERSION_STRING;
+   #else
+    const juce::String version;
+   #endif
+    // the version you're running, so it's easy to tell whether an update arrived
+    juce::String label = version.isNotEmpty() ? juce::String::fromUTF8 ("Update  \xc2\xb7  v") + version.upToLastOccurrenceOf (".0", false, false) : juce::String ("Update");
+    if (version.isNotEmpty() && ! version.endsWith (".0")) label = juce::String::fromUTF8 ("Update  \xc2\xb7  v") + version;
     auto colour = theme::text;
     switch (st)
     {
@@ -244,7 +251,7 @@ void MainComponent::updaterChanged()
         case S::Available:      label = juce::String::fromUTF8 ("Update \xe2\x97\x8f"); colour = theme::accent; break;
         case S::Downloading:    label = "Updating " + juce::String (juce::roundToInt (updater.getProgress() * 100.0f)) + "%"; colour = theme::accent; break;
         case S::ReadyToInstall: label = "Restart to update"; colour = theme::accent; break;
-        case S::Failed:         label = "Update"; break;
+        case S::Failed:         break;
     }
     updateButton.setButtonText (label);
     updateButton.setColour (juce::TextButton::textColourOffId, colour);
@@ -253,7 +260,7 @@ void MainComponent::updaterChanged()
     if (st == S::UpToDate)
     {
         userAskedForUpdate = false;
-        showMessage ("You're up to date", "This is the newest RENASOUND (build " + juce::String (Updater::currentBuild()) + ").");
+        showMessage ("You're up to date", "This is the newest RENASOUND (version " + version + ", build " + juce::String (Updater::currentBuild()) + ").");
     }
     else if (st == S::Failed)
     {

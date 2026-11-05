@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(Renasound VERSION 0.10.0 LANGUAGES C CXX)
+project(Renasound VERSION 0.10.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -27,7 +27,7 @@ endif()
 # ---- Images baked into the app ---------------------------------------------
 set(RENASOUND_BUILD_NUMBER 0 CACHE STRING "Build number, set by CI; the updater compares it with GitHub's")
 
-juce_add_binary_data(RenasoundAssets SOURCES Resources/logo_mark.png)
+juce_add_binary_data(RenasoundAssets SOURCES Resources/logo_mark.png Resources/RenasoundDocument.ico)
 
 # ---- Shared settings for the app and the test --------------------------------
 set(RENASOUND_DEFINITIONS
@@ -48,16 +48,24 @@ set(RENASOUND_MODULES
     juce::juce_gui_extra)
 
 # ---- The app ----------------------------------------------------------------
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/Resources/DocumentTypes.plist" RENASOUND_DOCUMENT_PLIST)
 juce_add_gui_app(Renasound
     PRODUCT_NAME            "RENASOUND"
     COMPANY_NAME            "RENASOUND"
     BUNDLE_ID               "com.renasound.daw"
-    VERSION                 0.4.0
+    VERSION                 ${PROJECT_VERSION}
     ICON_BIG                "${CMAKE_CURRENT_SOURCE_DIR}/Resources/icon.png"
+    # .renasound files get their own icon and open in RENASOUND (macOS; Windows registers itself at startup)
+    PLIST_TO_MERGE          "${RENASOUND_DOCUMENT_PLIST}"
     MICROPHONE_PERMISSION_ENABLED TRUE
     MICROPHONE_PERMISSION_TEXT "RENASOUND needs your microphone to record audio tracks.")
 
 juce_generate_juce_header(Renasound)
+
+if(APPLE)
+    target_sources(Renasound PRIVATE Resources/RenasoundDocument.icns)
+    set_source_files_properties(Resources/RenasoundDocument.icns PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+endif()
 
 target_sources(Renasound PRIVATE
     Source/Main.cpp
