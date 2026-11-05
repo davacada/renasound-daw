@@ -9,6 +9,7 @@
 #include "../Source/ClipOps.h"
 #include "../Source/SynthFx.h"
 #include "../Source/Export.h"
+#include "../Source/MultiSampler.h"
 
 int main (int argc, char** argv)
 {
@@ -136,7 +137,7 @@ int main (int argc, char** argv)
                       << " dB" << (finite ? "" : "  NOT FINITE") << "\n";
             for (int c = 0; c < 2; ++c) all.copyFrom (c, i * len, b, c, 0, len);
 
-            if (i == 1 || i == 8)   // a picture of the editor with the sound playing
+            if (i == 1 || i == 8 || i == 12 || i == 13)   // a picture of the editor with the sound playing
             {
                 std::unique_ptr<juce::AudioProcessorEditor> ed (fx->createEditor());
                 juce::MidiBuffer m;
@@ -373,15 +374,581 @@ int main (int argc, char** argv)
         return 0;
     }
 
+    if (argc >= 3 && juce::String (argv[1]) == "--msamp")
+    {
+        // the Multi Sampler on a real folder (argv[2]), then on a made-up SFZ
+        juce::ScopedJuceInitialiser_GUI gui;
+        const double sr = 48000; const int block = 512;
+        bool ok = true;
+        auto freqOf = [&] (const juce::AudioBuffer<float>& b, int from, int to)
+        {
+            int crossings = 0; double first = -1, last = 0;
+            juce::AudioBuffer<float> m (1, to - from);
+            for (int i = from; i < to; ++i) m.setSample (0, i - from, b.getSample (0, i) + b.getSample (1, i));
+            // a gentle low-pass so harmonics don't add crossings
+            float lp = 0; for (int i = 0; i < m.getNumSamples(); ++i) { lp += 0.08f * (m.getSample (0, i) - lp); m.setSample (0, i, lp); }
+            for (int i = 1; i < m.getNumSamples(); ++i)
+                if (m.getSample (0, i - 1) <= 0 && m.getSample (0, i) > 0)
+                {
+                    const double t = i - 1 + m.getSample (0, i - 1) / (m.getSample (0, i - 1) - m.getSample (0, i));
+                    if (first < 0) first = t; else ++crossings;
+                    last = t;
+                }
+            return crossings > 0 ? sr * crossings / (last - first) : 0.0;
+        };
+        auto fx = rs::createMultiSampler();
+        fx->setPlayConfigDetails (2, 2, sr, block);
+        fx->prepareToPlay (sr, block);
+        const auto t0 = juce::Time::getMillisecondCounterHiRes();
+        juce::String loadErr;
+        if (! rs::multiSamplerLoadNow (fx.get(), juce::File (argv[2]), loadErr)) { std::cout << "load failed: " << loadErr << "\n"; return 1; }
+        auto in = rs::multiSamplerInstrument (fx.get());
+        if (in == nullptr) { std::cout << "load failed\n"; return 1; }
+        std::cout << "loaded \"" << in->name << "\" in " << (juce::Time::getMillisecondCounterHiRes() - t0) / 1000.0 << " s: " << in->samples << " sounds, "
+                  << in->zones.size() << " zones, " << in->velocityLayers << " layers, " << in->roundRobins << " round robins, " << in->bytes / (1024 * 1024) << " MB, octave correction " << in->octaveCorrection << "\n";
+        for (int a = 0; a < in->articulations.size(); ++a)
+        {
+            int zones = 0, lo = 127, hi = 0, rel = 0;
+            for (auto& z : in->zones) if (z.articulation == a) { ++zones; lo = juce::jmin (lo, z.loKey); hi = juce::jmax (hi, z.hiKey); rel += z.release; }
+            std::cout << "  artic " << a << " \"" << in->articulations[a] << "\" zones " << zones << " (release " << rel << ") keys " << lo << "-" << hi
+                      << " keyswitch " << (a < (int) in->keyswitches.size() ? in->keyswitches[(size_t) a] : -1) << "\n";
+        }
+        auto play = [&] (std::vector<std::tuple<double, int, float, bool>> events, double seconds)
+        {
+            juce::AudioBuffer<float> out (2, (int) (sr * seconds));
+            for (int pos = 0; pos < out.getNumSamples(); pos += block)
+            {
+                const int len = juce::jmin (block, out.getNumSamples() - pos);
+                juce::MidiBuffer m;
+                for (auto& [t, note, vel, on] : events)
+                {
+                    const int at = (int) (t * sr);
+                    if (at >= pos && at < pos + len) m.addEvent (on ? juce::MidiMessage::noteOn (1, note, vel) : juce::MidiMessage::noteOff (1, note), at - pos);
+                }
+                juce::AudioBuffer<float> view (out.getArrayOfWritePointers(), 2, pos, len);
+                fx->processBlock (view, m);
+            }
+            return out;
+        };
+        auto* rsFx = dynamic_cast<rs::BuiltinFx*> (fx.get());
+        auto zoneNow = [&] { for (auto& v : rsFx->getParameters()) juce::ignoreUnused (v); return 0; };
+        juce::ignoreUnused (zoneNow);
+        // 1) A3 (57) mf: the right pitch
+        {
+            auto out = play ({ { 0.0, 57, 0.6f, true }, { 1.0, 57, 0.6f, false } }, 1.6);
+            auto pitchOf = [&] (const juce::AudioBuffer<float>& b) { juce::AudioBuffer<float> seg (2, (int) (sr * 0.9)); for (int c = 0; c < 2; ++c) seg.copyFrom (c, 0, b, c, 0, seg.getNumSamples()); return rs::msamp::detectPitchHz (seg, sr); };
+            const double f = pitchOf (out);
+            std::cout << "A3 plays at " << f << " Hz (220 expected), peak " << out.getMagnitude (0, out.getNumSamples()) << "\n";
+            ok = ok && std::abs (1200 * std::log2 (f / 220.0)) < 30;
+            // between two sampled notes: a note one semitone up is transposed
+            auto out2 = play ({ { 0.0, 58, 0.6f, true }, { 1.0, 58, 0.6f, false } }, 1.6);
+            const double f2 = pitchOf (out2);
+            std::cout << "A#3 plays at " << f2 << " Hz (233.1 expected)\n";
+            ok = ok && std::abs (1200 * std::log2 (f2 / 233.08)) < 30;
+        }
+        // 2) round robins: the same note again uses the next take; soft and loud use different layers
+        {
+            auto startNote = [&] (int note, float vel)
+            {
+                juce::AudioBuffer<float> b (2, block);
+                juce::MidiBuffer none;
+                for (int r = 0; r < 300; ++r) { juce::MidiBuffer m; if (r == 0) m.addEvent (juce::MidiMessage::allSoundOff (1), 0); fx->processBlock (b, r == 0 ? m : none); }
+                juce::MidiBuffer m; m.addEvent (juce::MidiMessage::noteOn (1, note, vel), 0);
+                fx->processBlock (b, m);
+                auto z = rs::multiSamplerSoundingZones (fx.get());
+                juce::MidiBuffer off; off.addEvent (juce::MidiMessage::noteOff (1, note), 0);
+                fx->processBlock (b, off);
+                return z.empty() ? juce::String ("(none)") : in->zones[(size_t) z.back()].name;
+            };
+            juce::StringArray takes;
+            for (int k = 0; k < 4; ++k) takes.add (startNote (57, 0.6f));
+            std::cout << "A3 four times: " << takes.joinIntoString (" | ") << "\n";
+            ok = ok && takes[0] != takes[1] && takes[0] == takes[2];
+            const auto soft = startNote (57, 0.15f), loud = startNote (57, 1.0f);
+            std::cout << "soft: " << soft << "   loud: " << loud << "\n";
+            ok = ok && soft != loud;
+        }
+        // 3) release sounds and keyswitches: play, let go, a release sound follows
+        {
+            auto out = play ({ { 0.0, 57, 0.7f, true }, { 0.5, 57, 0.7f, false } }, 1.5);
+            const float after = out.getRMSLevel (0, (int) (sr * 0.7), (int) (sr * 0.5));
+            std::cout << "after letting go: " << juce::Decibels::gainToDecibels (after) << " dB rms (release sounds)\n";
+            for (int a = 0; a < in->articulations.size(); ++a)
+            {
+                const int ks = in->keyswitches[(size_t) a];
+                if (ks < 0) continue;
+                auto o = play ({ { 0.0, ks, 0.8f, true }, { 0.01, ks, 0.8f, false }, { 0.05, 57, 0.7f, true }, { 0.8, 57, 0.7f, false } }, 1.2);
+                std::cout << "  keyswitch " << ks << " -> artic " << rsFx->param ("artic") << " (" << in->articulations[a] << "): " << juce::Decibels::gainToDecibels (o.getRMSLevel (0, 0, o.getNumSamples())) << " dB\n";
+                ok = ok && (int) rsFx->param ("artic") == a;
+            }
+        }
+        // 4) a little phrase for listening: sustain melody, then spiccato, then pizzicato
+        {
+            auto setArt = [&] (const juce::String& name) { for (int a = 0; a < in->articulations.size(); ++a) if (in->articulations[a].startsWithIgnoreCase (name)) { auto* p = rsFx->state.getParameter ("artic"); p->setValueNotifyingHost (p->convertTo0to1 ((float) a)); return; } };
+            juce::AudioBuffer<float> all (2, (int) (sr * 14)); all.clear();
+            int at = 0;
+            auto append = [&] (const juce::AudioBuffer<float>& b) { for (int c = 0; c < 2; ++c) all.copyFrom (c, at, b, c, 0, juce::jmin (b.getNumSamples(), all.getNumSamples() - at)); at += b.getNumSamples(); };
+            setArt ("Sustain");
+            const int mel[] { 62, 66, 69, 74, 73, 69, 71, 66 };
+            std::vector<std::tuple<double, int, float, bool>> ev;
+            for (int k = 0; k < 8; ++k) { ev.push_back ({ k * 0.55, mel[k], 0.45f + 0.06f * k, true }); ev.push_back ({ k * 0.55 + 0.5, mel[k], 0.5f, false }); }
+            append (play (ev, 5.2));
+            setArt ("Spicc");
+            ev.clear();
+            for (int k = 0; k < 16; ++k) { const int nn = mel[k % 8]; ev.push_back ({ k * 0.17, nn, 0.7f, true }); ev.push_back ({ k * 0.17 + 0.12, nn, 0.7f, false }); }
+            append (play (ev, 3.6));
+            setArt ("Pizz");
+            ev.clear();
+            for (int k = 0; k < 8; ++k) { ev.push_back ({ k * 0.3, mel[k] - 5, 0.8f, true }); ev.push_back ({ k * 0.3 + 0.2, mel[k] - 5, 0.8f, false }); }
+            append (play (ev, 3.6));
+            bool finite = true;
+            for (int c = 0; c < 2; ++c) for (int i = 0; i < all.getNumSamples(); ++i) finite = finite && std::isfinite (all.getSample (c, i));
+            const float pk = all.getMagnitude (0, all.getNumSamples());
+            if (pk > 0) all.applyGain (0.7f / pk);
+            juce::String err;
+            if (argc > 3) rs::exporter::write (all, sr, {}, {}, juce::File (argv[3]), err);
+            std::cout << "phrase rendered, peak before normalising " << pk << (finite ? "" : " NON-FINITE") << "\n";
+            ok = ok && finite;
+        }
+        if (argc > 4)   // a picture of the panel with notes held
+        {
+            if (auto* p = rsFx->state.getParameter ("artic")) p->setValueNotifyingHost (p->convertTo0to1 (0.0f));
+            std::unique_ptr<juce::AudioProcessorEditor> ed (fx->createEditor());
+            juce::MidiBuffer m;
+            for (auto [nn, vv] : { std::pair { 62, 0.9f }, { 69, 0.5f }, { 74, 0.2f } }) m.addEvent (juce::MidiMessage::noteOn (1, nn, vv), 0);
+            juce::AudioBuffer<float> b (2, block);
+            fx->processBlock (b, m);
+            for (int f = 0; f < 10; ++f) { juce::MidiBuffer none; fx->processBlock (b, none); ed->createComponentSnapshot (ed->getLocalBounds()); juce::Thread::sleep (40); }
+            auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);
+            juce::File pf (argv[4]); pf.deleteFile();
+            juce::FileOutputStream os (pf);
+            juce::PNGImageFormat().writeImageToStream (img, os);
+        }
+        // 5) SFZ: keyswitched articulations, round robins (seq), a release trigger, a loop, #define
+        {
+            auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("rs-sfz-test");
+            dir.deleteRecursively();
+            dir.getChildFile ("samples").createDirectory();
+            auto tone = [&] (const juce::String& name, double hz, double secs, float amp)
+            {
+                juce::AudioBuffer<float> b (1, (int) (sr * secs));
+                for (int i = 0; i < b.getNumSamples(); ++i) b.setSample (0, i, amp * (float) std::sin (juce::MathConstants<double>::twoPi * hz * i / sr));
+                juce::WavAudioFormat wav;
+                auto f = dir.getChildFile ("samples").getChildFile (name);
+                std::unique_ptr<juce::OutputStream> os (f.createOutputStream());
+                std::unique_ptr<juce::AudioFormatWriter> w (wav.createWriterFor (os.release(), sr, 1, 24, {}, 0));
+                w->writeFromAudioSampleBuffer (b, 0, b.getNumSamples());
+            };
+            tone ("c4_a.wav", 261.63, 1.0, 0.5f); tone ("c4_b.wav", 261.63, 1.0, 0.25f);
+            tone ("g4.wav", 392.0, 1.0, 0.5f); tone ("stac_c4.wav", 261.63, 0.15, 0.5f); tone ("rel.wav", 1000.0, 0.2, 0.3f);
+            dir.getChildFile ("test.sfz").replaceWithText (
+                "// a test instrument\n#define $LOWKEY c3\n<control> default_path=samples/\n"
+                "<global> ampeg_release=0.25\n"
+                "<group> sw_last=c1 sw_label=Long\n"
+                "<region> sample=c4_a.wav lokey=$LOWKEY hikey=e4 pitch_keycenter=c4 seq_length=2 seq_position=1 loop_mode=loop_continuous loop_start=1000 loop_end=10175\n"
+                "<region> sample=c4_b.wav lokey=$LOWKEY hikey=e4 pitch_keycenter=c4 seq_length=2 seq_position=2\n"
+                "<region> sample=g4.wav lokey=f4 hikey=b5 pitch_keycenter=67\n"
+                "<region> sample=rel.wav lokey=c3 hikey=b5 trigger=release volume=-6\n"
+                "<group> sw_last=d1 sw_label=Short\n"
+                "<region> sample=stac_c4.wav lokey=c3 hikey=b5 pitch_keycenter=c4\n");
+            auto sfx = rs::createMultiSampler();
+            sfx->setPlayConfigDetails (2, 2, sr, block);
+            sfx->prepareToPlay (sr, block);
+            juce::String e;
+            const bool loaded = rs::multiSamplerLoadNow (sfx.get(), dir.getChildFile ("test.sfz"), e);
+            auto sin = rs::multiSamplerInstrument (sfx.get());
+            if (! loaded || sin == nullptr) { std::cout << "sfz load failed: " << e << "\n"; ok = false; }
+            else
+            {
+                std::cout << "sfz: " << sin->zones.size() << " zones, articulations " << sin->articulations.joinIntoString (", ") << ", keyswitches " << sin->keyswitches[0] << " " << sin->keyswitches[1]
+                          << ", round robins " << sin->roundRobins << ", release " << dynamic_cast<rs::BuiltinFx*> (sfx.get())->param ("release") << " ms\n";
+                ok = ok && sin->zones.size() == 5 && sin->articulations.size() == 2 && sin->keyswitches[0] == 24 && sin->keyswitches[1] == 26 && sin->roundRobins == 2;
+                // held for 2 s: the looping take keeps sounding past its 1 s length, the other one stops
+                auto holdNote = [&] (int note)
+                {
+                    juce::AudioBuffer<float> out (2, (int) (sr * 2.0));
+                    for (int pos = 0; pos < out.getNumSamples(); pos += block)
+                    {
+                        juce::MidiBuffer m;
+                        if (pos == 0) m.addEvent (juce::MidiMessage::noteOn (1, note, 0.9f), 0);
+                        juce::AudioBuffer<float> view (out.getArrayOfWritePointers(), 2, pos, juce::jmin (block, out.getNumSamples() - pos));
+                        sfx->processBlock (view, m);
+                    }
+                    juce::MidiBuffer off; off.addEvent (juce::MidiMessage::noteOff (1, note), 0);
+                    juce::AudioBuffer<float> tail (2, (int) (sr * 1.0));
+                    juce::MidiBuffer none;
+                    for (int pos = 0; pos < tail.getNumSamples(); pos += block) { juce::AudioBuffer<float> view (tail.getArrayOfWritePointers(), 2, pos, juce::jmin (block, tail.getNumSamples() - pos)); sfx->processBlock (view, pos == 0 ? off : none); }
+                    return std::make_pair (out.getRMSLevel (0, (int) (sr * 1.3), (int) (sr * 0.5)), rs::msamp::detectPitchHz (tail, sr));
+                };
+                const auto first = holdNote (60), second = holdNote (60);
+                std::cout << "  take 1 (loops) after 1.3 s: " << juce::Decibels::gainToDecibels (first.first) << " dB, take 2 (no loop): " << juce::Decibels::gainToDecibels (second.first, -120.0f) << " dB; release sound at " << second.second << " Hz\n";
+                ok = ok && first.first > 0.05f && second.first < 0.001f && std::abs (second.second - 1000) < 20;
+                // keyswitch to "Short": a 0.15 s note
+                juce::AudioBuffer<float> b (2, (int) (sr * 0.6));
+                for (int pos = 0; pos < b.getNumSamples(); pos += block)
+                {
+                    juce::MidiBuffer m;
+                    if (pos == 0) { m.addEvent (juce::MidiMessage::noteOn (1, 26, 0.9f), 0); m.addEvent (juce::MidiMessage::noteOn (1, 62, 0.9f), 10); }
+                    juce::AudioBuffer<float> view (b.getArrayOfWritePointers(), 2, pos, juce::jmin (block, b.getNumSamples() - pos));
+                    sfx->processBlock (view, m);
+                }
+                const float early = b.getRMSLevel (0, 0, (int) (sr * 0.1)), late = b.getRMSLevel (0, (int) (sr * 0.3), (int) (sr * 0.2));
+                std::cout << "  keyswitch d1 -> " << sin->articulations[(int) dynamic_cast<rs::BuiltinFx*> (sfx.get())->param ("artic")] << ": " << juce::Decibels::gainToDecibels (early) << " dB then " << juce::Decibels::gainToDecibels (late, -120.0f) << " dB\n";
+                ok = ok && early > 0.05f && late < 0.001f;
+            }
+            dir.deleteRecursively();
+        }
+        std::cout << (ok ? "MSAMP OK\n" : "MSAMP FAILED\n");
+        return ok ? 0 : 1;
+    }
+
+    if (argc >= 2 && juce::String (argv[1]) == "--fx2")
+    {
+        juce::ScopedJuceInitialiser_GUI gui;
+        const double sr = 48000; const int block = 512;
+        auto setP = [] (rs::BuiltinFx& fx, const char* id, float v)
+        {
+            auto* p = fx.state.getParameter (id);
+            p->setValueNotifyingHost (p->convertTo0to1 (v));
+        };
+        auto run = [&] (rs::BuiltinFx& fx, juce::AudioBuffer<float>& buf)
+        {
+            fx.setPlayConfigDetails (2, 2, sr, block);
+            fx.prepareToPlay (sr, block);
+            juce::MidiBuffer m;
+            for (int pos = 0; pos < buf.getNumSamples(); pos += block)
+            {
+                const int n = juce::jmin (block, buf.getNumSamples() - pos);
+                juce::AudioBuffer<float> view (buf.getArrayOfWritePointers(), 2, pos, n);
+                fx.processBlock (view, m);
+            }
+        };
+        auto sine = [&] (double hz, float amp, double secs)
+        {
+            juce::AudioBuffer<float> b (2, (int) (sr * secs));
+            for (int i = 0; i < b.getNumSamples(); ++i) { const float v = amp * (float) std::sin (juce::MathConstants<double>::twoPi * hz * i / sr); b.setSample (0, i, v); b.setSample (1, i, v); }
+            return b;
+        };
+        auto freqOf = [&] (const juce::AudioBuffer<float>& b, int from, int to)
+        {
+            int crossings = 0; double first = -1, last = 0;
+            for (int i = from + 1; i < to; ++i)
+                if (b.getSample (0, i - 1) <= 0 && b.getSample (0, i) > 0)
+                {
+                    const double t = i - 1 + b.getSample (0, i - 1) / (b.getSample (0, i - 1) - b.getSample (0, i));
+                    if (first < 0) first = t; else ++crossings;
+                    last = t;
+                }
+            return crossings > 0 ? sr * crossings / (last - first) : 0.0;
+        };
+        bool ok = true;
+
+        // Auto-Tune: 452 Hz (A4 +47 cents) -> 440, and 425 Hz (-60 cents, nearer G#) -> 415.3
+        for (double in : { 452.0, 425.0, 262.0 })
+        {
+            auto fx = rs::createAutoTune();
+            setP (*fx, "speed", 0);
+            setP (*fx, "humanize", 0);
+            auto b = sine (in, 0.5f, 2.0);
+            run (*fx, b);
+            const double out = freqOf (b, (int) (sr * 1.0), (int) (sr * 2.0));
+            const double want = 440.0 * std::pow (2.0, std::round (12.0 * std::log2 (in / 440.0)) / 12.0);
+            const double cents = 1200.0 * std::log2 (out / want);
+            std::cout << "autotune " << in << " Hz -> " << out << " Hz (want " << want << ", " << cents << " cents)\n";
+            ok = ok && std::abs (cents) < 10.0;
+        }
+        // Auto-Tune in C major: 277 Hz (C#4) must go to C or D
+        {
+            auto fx = rs::createAutoTune();
+            setP (*fx, "speed", 0); setP (*fx, "humanize", 0); setP (*fx, "scale", 1);
+            auto b = sine (280.0, 0.5f, 2.0);
+            run (*fx, b);
+            const double out = freqOf (b, (int) sr, (int) (sr * 2));
+            std::cout << "autotune C major 280 Hz -> " << out << " Hz\n";
+            ok = ok && (std::abs (out - 261.6) < 3 || std::abs (out - 293.7) < 3);
+        }
+        // Voice Cleaner with nothing removed should give the input back (delayed by its latency)
+        {
+            auto fx = rs::createVoiceCleaner();
+            setP (*fx, "noise", 0); setP (*fx, "reverb", 0);
+            auto b = sine (330.0, 0.5f, 1.0);
+            auto ref = b;
+            run (*fx, b);
+            const int lat = fx->getLatencySamples();
+            double err = 0, e2 = 0;
+            for (int i = 8192; i < b.getNumSamples(); ++i) { const double d = b.getSample (0, i) - ref.getSample (0, i - lat); err += d * d; e2 += ref.getSample (0, i - lat) * ref.getSample (0, i - lat); }
+            const double ratio = b.getRMSLevel (0, 8192, b.getNumSamples() - 8192) / ref.getRMSLevel (0, 8192, b.getNumSamples() - 8192);
+            std::cout << "voiceclean unity: gain " << ratio << " error " << juce::Decibels::gainToDecibels ((float) std::sqrt (err / e2)) << " dB\n";
+            ok = ok && std::abs (ratio - 1.0) < 0.02;
+        }
+        // Voice Cleaner removes steady noise between words
+        {
+            auto fx = rs::createVoiceCleaner();
+            setP (*fx, "noise", 100); setP (*fx, "reverb", 0);
+            juce::AudioBuffer<float> b (2, (int) (sr * 3));
+            juce::Random r (3);
+            for (int i = 0; i < b.getNumSamples(); ++i)
+            {
+                const bool talk = (i / (int) (sr * 0.5)) % 2 == 1;
+                const float v = 0.03f * (r.nextFloat() * 2 - 1) + (talk ? 0.4f * (float) std::sin (juce::MathConstants<double>::twoPi * 220 * i / sr) : 0.0f);
+                b.setSample (0, i, v); b.setSample (1, i, v);
+            }
+            run (*fx, b);
+            const int lat = fx->getLatencySamples();
+            const float gap = b.getRMSLevel (0, (int) (sr * 2.1) + lat, (int) (sr * 0.3));   // a pause: noise only
+            const float talk = b.getRMSLevel (0, (int) (sr * 2.6) + lat, (int) (sr * 0.3));
+            std::cout << "voiceclean noise in pause: " << juce::Decibels::gainToDecibels (gap) << " dB (was " << juce::Decibels::gainToDecibels (0.03f / std::sqrt (3.0f)) << "), voice " << juce::Decibels::gainToDecibels (talk) << " dB\n";
+            ok = ok && gap < 0.03f / std::sqrt (3.0f) * 0.5f && talk > 0.25f;
+        }
+        // Voice Cleaner shortens a reverb tail: tone bursts, each followed by a 1.2 s decaying "room"
+        {
+            float tails[2];
+            for (int pass = 0; pass < 2; ++pass)
+            {
+                auto fx = rs::createVoiceCleaner();
+                setP (*fx, "noise", 0); setP (*fx, "reverb", pass == 0 ? 0.0f : 100.0f);
+                juce::AudioBuffer<float> b (2, (int) (sr * 4));
+                juce::Random r (5);
+                for (int i = 0; i < b.getNumSamples(); ++i)
+                {
+                    const double t = std::fmod (i / sr, 2.0);
+                    const float dry = t < 0.3 ? 0.4f * (float) std::sin (juce::MathConstants<double>::twoPi * 300 * i / sr) : 0.0f;
+                    const float room = (float) (0.12 * std::exp (-6.9 * juce::jmax (0.0, t - 0.3) / 1.2)) * (r.nextFloat() * 2 - 1) * (t > 0.02 ? 1.0f : 0.0f);
+                    b.setSample (0, i, dry + room); b.setSample (1, i, dry + room);
+                }
+                run (*fx, b);
+                tails[pass] = b.getRMSLevel (0, (int) (sr * 2.45) + fx->getLatencySamples(), (int) (sr * 0.6));
+            }
+            std::cout << "voiceclean reverb tail: " << juce::Decibels::gainToDecibels (tails[1] / tails[0]) << " dB with Reverb at 100%\n";
+            ok = ok && tails[1] < tails[0] * 0.5f;
+        }
+        // Bus compressor reduces gain on a loud signal
+        {
+            auto fx = rs::createBusCompressor();
+            setP (*fx, "threshold", -20); setP (*fx, "ratio", 4);
+            auto b = sine (100, 0.5f, 1.0);
+            run (*fx, b);
+            std::cout << "buscomp GR " << fx->meterValue.load() << " dB, out rms " << juce::Decibels::gainToDecibels (b.getRMSLevel (0, (int) sr / 2, (int) sr / 2)) << " dB\n";
+            ok = ok && fx->meterValue.load() < -3.0f;
+        }
+        // Limiter never goes past the ceiling
+        {
+            auto fx = rs::createLimiter();
+            setP (*fx, "gain", 12); setP (*fx, "ceiling", -1);
+            juce::AudioBuffer<float> b (2, (int) sr);
+            juce::Random r (1);
+            for (int i = 0; i < b.getNumSamples(); ++i) { const float v = (r.nextFloat() * 2 - 1) * (i % 9000 < 200 ? 1.0f : 0.2f); b.setSample (0, i, v); b.setSample (1, i, v); }
+            run (*fx, b);
+            const float pk = b.getMagnitude (0, b.getNumSamples());
+            std::cout << "limiter peak " << juce::Decibels::gainToDecibels (pk) << " dB (ceiling -1)\n";
+            ok = ok && pk <= juce::Decibels::decibelsToGain (-1.0f) + 1e-4f;
+        }
+        // Sub bass adds energy an octave down
+        {
+            auto fx = rs::createSubBass();
+            setP (*fx, "dry", 0);
+            auto b = sine (110, 0.5f, 1.0);
+            run (*fx, b);
+            const double f = freqOf (b, (int) (sr * 0.5), (int) sr);
+            std::cout << "subbass 110 Hz -> " << f << " Hz, level " << juce::Decibels::gainToDecibels (b.getRMSLevel (0, (int) sr / 2, (int) sr / 2)) << " dB\n";
+            ok = ok && std::abs (f - 55) < 2;
+        }
+        // Color EQ flat at zero gains, every character
+        for (int ch = 0; ch < 4; ++ch)
+        {
+            auto fx = rs::createColorEq();
+            setP (*fx, "model", (float) ch);
+            float worst = 0;
+            for (double hz : { 50.0, 200.0, 1000.0, 5000.0, 15000.0 }) worst = juce::jmax (worst, std::abs (juce::Decibels::gainToDecibels ((float) fx->getMagnitudeForFrequency (hz))));
+            std::cout << "coloreq character " << ch << " flat within " << worst << " dB\n";
+        }
+        // everything new stays finite and sensible on noise + tone
+        for (auto id : { "autotune", "buscomp", "coloreq", "voiceclean", "rotary", "deesser", "bitcrusher", "dubdelay", "limiter", "ringmod", "subbass" })
+        {
+            auto fx = rs::createBuiltinFx (id);
+            juce::AudioBuffer<float> b (2, (int) (sr * 2));
+            juce::Random r (7);
+            for (int i = 0; i < b.getNumSamples(); ++i) { const float v = 0.1f * (r.nextFloat() * 2 - 1) + 0.3f * (float) std::sin (juce::MathConstants<double>::twoPi * 200 * i / sr); b.setSample (0, i, v); b.setSample (1, i, v * 0.9f); }
+            const float inRms = b.getRMSLevel (0, 0, b.getNumSamples());
+            run (*fx, b);
+            bool finite = true;
+            for (int c = 0; c < 2; ++c) for (int i = 0; i < b.getNumSamples(); ++i) finite = finite && std::isfinite (b.getSample (c, i));
+            const float outRms = b.getRMSLevel (0, 0, b.getNumSamples()), pk = b.getMagnitude (0, b.getNumSamples());
+            std::cout << "  " << id << ": " << juce::Decibels::gainToDecibels (outRms / inRms) << " dB vs input, peak " << pk << (finite ? "" : " NON-FINITE") << "\n";
+            ok = ok && finite && pk < 4.0f;
+        }
+        // RENASYNTH mod matrix: on "Vibrato Lead" the mod wheel brings in the vibrato
+        {
+            int idx = -1;
+            for (int i = 0; i < (int) rs::getSynthPatches().size(); ++i) if (juce::String (rs::getSynthPatches()[(size_t) i].name) == "Vibrato Lead") idx = i;
+            double spread[2] {};
+            for (int pass = 0; pass < 2; ++pass)
+            {
+                auto fx = rs::createBuiltinFx ("synth");
+                rs::loadSynthPatch (fx.get(), idx);
+                setP (*fx, "o2level", 0); setP (*fx, "o1wave", 0); setP (*fx, "o1shape", 0); setP (*fx, "glide", 0); setP (*fx, "ftype", 1); setP (*fx, "cutoff", 20000);   // a plain sine, to measure
+                fx->setPlayConfigDetails (2, 2, sr, block);
+                fx->prepareToPlay (sr, block);
+                juce::AudioBuffer<float> b (2, (int) (sr * 2));
+                for (int pos = 0; pos < b.getNumSamples(); pos += block)
+                {
+                    juce::AudioBuffer<float> view (b.getArrayOfWritePointers(), 2, pos, juce::jmin (block, b.getNumSamples() - pos));
+                    juce::MidiBuffer m;
+                    if (pos == 0) { m.addEvent (juce::MidiMessage::controllerEvent (1, 1, pass == 0 ? 0 : 127), 0); m.addEvent (juce::MidiMessage::noteOn (1, 69, 0.8f), 0); }
+                    fx->processBlock (view, m);
+                }
+                double lo = 1e9, hi = 0;
+                for (int w = 0; w < 20; ++w) { const int a = (int) (sr * (0.5 + w * 0.06)); const double f = freqOf (b, a, a + (int) (sr * 0.03)); lo = juce::jmin (lo, f); hi = juce::jmax (hi, f); }
+                spread[pass] = 1200.0 * std::log2 (hi / lo);
+            }
+            std::cout << "synth vibrato: mod wheel off " << spread[0] << " cents, full " << spread[1] << " cents\n";
+            ok = ok && spread[0] < 5 && spread[1] > 40;
+        }
+        // the ladder at full resonance stays in bounds, and the matrix can't push anything to NaN
+        {
+            auto fx = rs::createBuiltinFx ("synth");
+            setP (*fx, "ftype", 4); setP (*fx, "reso", 100); setP (*fx, "cutoff", 800); setP (*fx, "unison", 7);
+            setP (*fx, "m1src", 1); setP (*fx, "m1dst", 2); setP (*fx, "m1amt", 100);
+            setP (*fx, "m2src", 9); setP (*fx, "m2dst", 3); setP (*fx, "m2amt", -100);
+            setP (*fx, "m3src", 6); setP (*fx, "m3dst", 12); setP (*fx, "m3amt", 100);
+            setP (*fx, "lfodepth", 0); setP (*fx, "lforate", 7);
+            fx->setPlayConfigDetails (2, 2, sr, block);
+            fx->prepareToPlay (sr, block);
+            juce::AudioBuffer<float> b (2, (int) (sr * 2));
+            for (int pos = 0; pos < b.getNumSamples(); pos += block)
+            {
+                juce::AudioBuffer<float> view (b.getArrayOfWritePointers(), 2, pos, juce::jmin (block, b.getNumSamples() - pos));
+                juce::MidiBuffer m;
+                if (pos == 0) for (int n : { 36, 48, 55, 60, 64, 67, 72, 84 }) m.addEvent (juce::MidiMessage::noteOn (1, n, 1.0f), 0);
+                fx->processBlock (view, m);
+            }
+            bool finite = true;
+            for (int c = 0; c < 2; ++c) for (int i = 0; i < b.getNumSamples(); ++i) finite = finite && std::isfinite (b.getSample (c, i));
+            std::cout << "synth ladder at full resonance: peak " << b.getMagnitude (0, b.getNumSamples()) << (finite ? "" : " NON-FINITE") << "\n";
+            ok = ok && finite;
+        }
+        // Widener: the phase guard eases off a signal that cancels in mono; mono check really is mono
+        {
+            auto fx = rs::createWidener();
+            juce::AudioBuffer<float> b (2, (int) sr);
+            for (int i = 0; i < b.getNumSamples(); ++i) { const float v = 0.3f * (float) std::sin (juce::MathConstants<double>::twoPi * 300 * i / sr); b.setSample (0, i, v); b.setSample (1, i, -0.8f * v); }
+            run (*fx, b);
+            const float guardG = dynamic_cast<rs::BuiltinFx*> (fx.get()) != nullptr ? fx->state.getParameter ("guard")->getValue() : 0.0f;
+            juce::ignoreUnused (guardG);
+            auto fx2 = rs::createWidener();
+            setP (*fx2, "monoCheck", 1);
+            juce::AudioBuffer<float> c (2, (int) sr);
+            juce::Random r (2);
+            for (int i = 0; i < c.getNumSamples(); ++i) { c.setSample (0, i, r.nextFloat() - 0.5f); c.setSample (1, i, r.nextFloat() - 0.5f); }
+            run (*fx2, c);
+            float diff = 0;
+            for (int i = 0; i < c.getNumSamples(); ++i) diff = juce::jmax (diff, std::abs (c.getSample (0, i) - c.getSample (1, i)));
+            // what's left of the side signal with the guard on, compared with off
+            auto fx3 = rs::createWidener();
+            setP (*fx3, "guard", 0);
+            juce::AudioBuffer<float> b2 (2, (int) sr);
+            for (int i = 0; i < b2.getNumSamples(); ++i) { const float v = 0.3f * (float) std::sin (juce::MathConstants<double>::twoPi * 300 * i / sr); b2.setSample (0, i, v); b2.setSample (1, i, -0.8f * v); }
+            run (*fx3, b2);
+            auto sideOf = [] (juce::AudioBuffer<float>& x) { double e = 0; for (int i = x.getNumSamples() / 2; i < x.getNumSamples(); ++i) { const double sd = x.getSample (0, i) - x.getSample (1, i); e += sd * sd; } return std::sqrt (e); };
+            const double ratio = sideOf (b) / sideOf (b2);
+            std::cout << "widener guard keeps " << juce::Decibels::gainToDecibels ((float) ratio) << " dB of an out-of-phase side, mono check L-R " << diff << "\n";
+            ok = ok && ratio < 0.5 && diff < 1e-6f;
+            // ordinary stereo at full width: the guard should not touch it
+            float outs[2];
+            for (int g2 = 0; g2 < 2; ++g2)
+            {
+                auto w = rs::createWidener();
+                setP (*w, "width", 200); setP (*w, "guard", (float) g2);
+                juce::AudioBuffer<float> x (2, (int) sr);
+                juce::Random rr (4);
+                float lpL = 0, lpR = 0;
+                for (int i = 0; i < x.getNumSamples(); ++i)
+                {
+                    const float common = rr.nextFloat() - 0.5f, own = rr.nextFloat() - 0.5f;
+                    lpL += 0.2f * (common + 0.35f * own - lpL); lpR += 0.2f * (common - 0.35f * own - lpR);
+                    x.setSample (0, i, lpL); x.setSample (1, i, lpR);
+                }
+                run (*w, x);
+                outs[g2] = x.getRMSLevel (0, 0, x.getNumSamples());
+            }
+            std::cout << "widener guard on ordinary stereo at 200%: " << juce::Decibels::gainToDecibels (outs[1] / outs[0]) << " dB difference\n";
+            ok = ok && std::abs (juce::Decibels::gainToDecibels (outs[1] / outs[0])) < 0.5f;
+        }
+        // Kick: the Big Room setting is longer, louder in the tail, and stays finite
+        {
+            float tails[2] {}; float peaks[2] {};
+            for (int pass = 0; pass < 2; ++pass)
+            {
+                auto fx = rs::createKickSynth();
+                if (pass == 1) setP (*fx, "hold", 110), setP (*fx, "tail", 65), setP (*fx, "room", 30), setP (*fx, "punch", 75), setP (*fx, "decay", 700);
+                fx->setPlayConfigDetails (2, 2, sr, block);
+                fx->prepareToPlay (sr, block);
+                juce::AudioBuffer<float> b (2, (int) sr);
+                for (int pos = 0; pos < b.getNumSamples(); pos += block)
+                {
+                    juce::AudioBuffer<float> view (b.getArrayOfWritePointers(), 2, pos, juce::jmin (block, b.getNumSamples() - pos));
+                    juce::MidiBuffer m;
+                    if (pos == 0) m.addEvent (juce::MidiMessage::noteOn (1, 36, 1.0f), 0);
+                    fx->processBlock (view, m);
+                }
+                tails[pass] = b.getRMSLevel (0, (int) (sr * 0.15), (int) (sr * 0.2));
+                peaks[pass] = b.getMagnitude (0, b.getNumSamples());
+                for (int i = 0; i < b.getNumSamples(); ++i) ok = ok && std::isfinite (b.getSample (0, i));
+            }
+            std::cout << "kick tail (150-350 ms): classic " << juce::Decibels::gainToDecibels (tails[0]) << " dB, big room " << juce::Decibels::gainToDecibels (tails[1]) << " dB, peaks " << peaks[0] << " / " << peaks[1] << "\n";
+            ok = ok && tails[1] > tails[0] * 2 && peaks[1] < 2.0f;
+        }
+        // Vocoder: both characters respond to a vowel-ish modulator and stay finite
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            auto fx = rs::createVocoder();
+            setP (*fx, "character", (float) ch);
+            auto* user = dynamic_cast<rs::SidechainUser*> (fx.get());
+            fx->setPlayConfigDetails (2, 2, sr, block);
+            fx->prepareToPlay (sr, block);
+            juce::AudioBuffer<float> out (2, (int) sr), mod (2, block);
+            juce::Random r (9);
+            long long n = 0;
+            for (int pos = 0; pos < out.getNumSamples(); pos += block)
+            {
+                const int len = juce::jmin (block, out.getNumSamples() - pos);
+                for (int i = 0; i < len; ++i, ++n)
+                {
+                    const bool ess = (n / 12000) % 4 == 3;   // every 4th quarter second: an "sss"
+                    const float v = ess ? 0.2f * (r.nextFloat() * 2 - 1) : 0.3f * (float) (std::sin (n * 0.04) + 0.6 * std::sin (n * 0.17) + 0.3 * std::sin (n * 0.33));
+                    mod.setSample (0, i, v); mod.setSample (1, i, v);
+                }
+                user->sidechain = &mod;
+                juce::AudioBuffer<float> view (out.getArrayOfWritePointers(), 2, pos, len);
+                juce::MidiBuffer m;
+                if (pos == 0) for (int note : { 48, 55, 60, 64 }) m.addEvent (juce::MidiMessage::noteOn (1, note, 0.9f), 0);
+                fx->processBlock (view, m);
+                user->sidechain = nullptr;
+            }
+            bool finite = true;
+            for (int c = 0; c < 2; ++c) for (int i = 0; i < out.getNumSamples(); ++i) finite = finite && std::isfinite (out.getSample (c, i));
+            const float rms = out.getRMSLevel (0, 0, out.getNumSamples());
+            std::cout << "vocoder " << (ch ? "vintage" : "modern") << ": " << juce::Decibels::gainToDecibels (rms) << " dB rms, peak " << out.getMagnitude (0, out.getNumSamples()) << (finite ? "" : " NON-FINITE") << "\n";
+            ok = ok && finite && rms > 0.01f;
+        }
+        std::cout << (ok ? "FX2 OK\n" : "FX2 FAILED\n");
+        return ok ? 0 : 1;
+    }
+
     if (argc >= 3 && juce::String (argv[1]) == "--faces")
     {
         // renders every effect faceplate while music-like audio runs through it
         const double sr = 48000.0;
         const juce::File outDir (argv[2]);
         outDir.createDirectory();
-        for (auto id : { "eq", "tubeeq", "compressor", "reverb", "delay", "noisegate", "gater", "phaser", "chorus" })
+        juce::StringArray ids { "eq", "tubeeq", "compressor", "reverb", "delay", "noisegate", "gater", "phaser", "chorus" };
+        if (argc > 3) { ids.clear(); for (int a = 3; a < argc; ++a) ids.add (argv[a]); }
+        for (auto& idStr : ids)
         {
+            const char* id = idStr.toRawUTF8();
             auto fx = rs::createBuiltinFx (id);
+            const bool sung = idStr == "autotune", bass = idStr == "subbass";
+            double ph = 0;
             auto set = [&] (const char* p, float v) { if (auto* q = fx->state.getParameter (p)) q->setValueNotifyingHost (q->convertTo0to1 (v)); };
             if (juce::String (id) == "eq") { set ("lowGain", 4); set ("midGain", -5); set ("midFreq", 900); set ("highGain", 3); set ("lowCut", 40); }
             if (juce::String (id) == "tubeeq") { set ("lowBoost", 6); set ("lowAtten", 3); set ("highBoost", 5); set ("drive", 6); }
@@ -390,12 +957,19 @@ int main (int argc, char** argv)
             if (juce::String (id) == "delay") { set ("sync", 0); set ("time", 320); set ("feedback", 55); set ("pingpong", 1); }
             if (juce::String (id) == "noisegate") { set ("threshold", -38); }
             if (juce::String (id) == "gater") { set ("pattern", 2); set ("length", 70); }
+            if (idStr == "autotune") { set ("scale", 1); set ("key", 2); }
+            if (idStr == "buscomp") { set ("threshold", -22); set ("ratio", 4); }
+            if (idStr == "coloreq") { set ("model", 1); set ("lowgain", 4); set ("midgain", -3); set ("highgain", 5); set ("hpf", 40); }
+            if (idStr == "deesser") { set ("threshold", -40); }
+            if (idStr == "bitcrusher") { set ("bits", 5); set ("rate", 3000); set ("drive", 12); }
+            if (idStr == "limiter") { set ("gain", 10); }
+            if (idStr == "rotary") { set ("speed", 1); }
             fx->setPlayConfigDetails (2, 2, sr, 512);
             fx->prepareToPlay (sr, 512);
             std::unique_ptr<juce::AudioProcessorEditor> ed (fx->createEditor());
             juce::Random rnd (3);
             long long n = 0;
-            for (int frame = 0; frame < 40; ++frame)
+            for (int frame = 0; frame < (sung ? 120 : 40); ++frame)
             {
                 for (int b = 0; b < 3; ++b)   // ~32 ms of audio per frame
                 {
@@ -404,14 +978,19 @@ int main (int argc, char** argv)
                     {
                         const double t = std::fmod ((double) n / sr, 0.5);
                         const float env = t < 0.3 ? (float) std::exp (-t / 0.12) : 0.0f;
-                        const float v = env * (0.5f * (float) std::sin (n * 0.02) + 0.15f * (rnd.nextFloat() * 2 - 1)) + 0.002f * (rnd.nextFloat() * 2 - 1);
+                        const double hz = sung ? 290.0 * std::pow (2.0, (0.6 * std::sin (n / sr * 0.9) + 0.08 * std::sin (n / sr * 30.0)) / 12.0)
+                                               : bass ? 70.0 : 152.8;
+                        ph += hz / sr;
+                        const float tone = (float) std::sin (ph * juce::MathConstants<double>::twoPi);
+                        const float v = sung ? 0.4f * tone + 0.003f * (rnd.nextFloat() * 2 - 1)
+                                             : env * (0.5f * tone + 0.15f * (rnd.nextFloat() * 2 - 1)) + 0.002f * (rnd.nextFloat() * 2 - 1);
                         buf.setSample (0, i, v); buf.setSample (1, i, v);
                     }
                     juce::MidiBuffer mb;
                     fx->processBlock (buf, mb);
                 }
                 auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);
-                if (frame == 39 || frame == 31)
+                if (frame == (sung ? 119 : 39) || frame == 31)
                 {
                     juce::FileOutputStream os (outDir.getChildFile (juce::String (id) + (frame == 31 ? "_a" : "") + ".png"));
                     os.setPosition (0); os.truncate();
@@ -877,7 +1456,7 @@ int main (int argc, char** argv)
     }
     engine.stop();
     std::cout << "after stop: vocals clips " << vocals->clips.size();
-    if (! vocals->clips.empty())
+    if (! vocals->clips.empty() && vocals->clips[0]->audio != nullptr)
         std::cout << " start " << vocals->clips[0]->startBeat << " len " << vocals->clips[0]->lengthSeconds << "s peak "
                   << vocals->clips[0]->audio->buffer.getMagnitude (0, vocals->clips[0]->audio->buffer.getNumSamples())
                   << " file " << vocals->clips[0]->audio->file.getFileName();
@@ -889,7 +1468,7 @@ int main (int argc, char** argv)
         if (! c->notes.empty()) std::cout << " pitch " << c->notes[0].pitch << " at " << c->notes[0].start << " len " << c->notes[0].length;
     }
     std::cout << "\n";
-    if (! vocals->clips.empty()) vocals->clips[0]->audio->file.deleteFile();
+    if (! vocals->clips.empty() && vocals->clips[0]->audio != nullptr) vocals->clips[0]->audio->file.deleteFile();
 
     // ---- every built-in effect, alone on the drums, then all on the master ----
     auto drums = project.tracks[0];

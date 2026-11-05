@@ -260,12 +260,15 @@ public:
         l.add (floatParam ("spread", "Spread", Range (0, 100), 35, "%"));
         l.add (floatParam ("bassMono", "Bass Mono", skewed (20, 500, 120), 120, "Hz"));
         l.add (floatParam ("output", "Output", Range (-12, 12), 0, "dB"));
+        l.add (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { "guard", 1 }, "Phase Guard", true));
+        l.add (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { "monoCheck", 1 }, "Mono Check", false));
         return l;
     }
 
     void prepareToPlay (double sr, int) override
     {
         currentSampleRate = sr;
+        guardGain = 1.0f;
         delay.assign ((size_t) juce::nextPowerOfTwo ((int) (sr * 0.05)), 0.0f);
         dpos = 0;
         for (auto& b : bass) b.reset();
@@ -293,6 +296,10 @@ public:
         const int mask = (int) delay.size() - 1;
         const int dly = (int) (sr * 0.011);
         const float corrCoef = coefFor (300, sr);
+        const bool guard = param ("guard") > 0.5f, monoCheck = param ("monoCheck") > 0.5f;
+        // phase guard: if the result starts to cancel itself (correlation below zero), ease the width back
+        const float guardDown = coefFor (40, sr), guardUp = coefFor (800, sr);
+        float minGuard = 1.0f;
 
         auto* L = buffer.getWritePointer (0);
         auto* R = buffer.getWritePointer (1);
@@ -310,7 +317,18 @@ public:
 
             if (bassOn) s = bass[1].process (bass[0].process (s, 0), 0);   // 24 dB/oct: lows stay centred
 
-            const float l = (m + s) * out, r = (m - s) * out;
+            if (guard)
+            {
+                const float den0 = std::sqrt (sLL * sRR);
+                const float c = den0 > 1.0e-9f ? sLR / den0 : 1.0f;
+                const float want = c < 0.0f ? 0.25f : c > 0.2f ? 1.0f : guardGain;   // (between 0 and 0.2: hold where it is)
+                guardGain += (want < guardGain ? guardDown : guardUp) * (want - guardGain);
+                s *= guardGain;
+                minGuard = juce::jmin (minGuard, guardGain);
+            }
+
+            float l = (m + s) * out, r = (m - s) * out;
+            if (monoCheck) l = r = m * out;   // hear it as a mono speaker would
             L[i] = l; R[i] = r;
 
             sLL += corrCoef * (l * l - sLL); sRR += corrCoef * (r * r - sRR); sLR += corrCoef * (l * r - sLR);
@@ -323,7 +341,9 @@ public:
         }
         const float den = std::sqrt (sLL * sRR);
         correlation = den > 1.0e-9f ? juce::jlimit (-1.0f, 1.0f, sLR / den) : 1.0f;
+        guardNow = minGuard;
     }
+    std::atomic<float> guardNow { 1.0f };
 
     static constexpr int scopeSize = 1024;
     std::array<std::atomic<float>, scopeSize> scopeL, scopeR;
@@ -337,7 +357,7 @@ private:
     int dpos = 0;
     std::array<Biquad, 2> bass;
     Biquad spreadHp;
-    float sLL = 0, sRR = 0, sLR = 0, lastBass = -1;
+    float sLL = 0, sRR = 0, sLR = 0, lastBass = -1, guardGain = 1.0f;
 };
 
 class WidenerEditor : public FaceEditor
@@ -354,7 +374,14 @@ public:
             addAndMakeVisible (*k);
         }
         width.label.setFont (theme::font (13.0f, true));
-        setSize (600, 400);
+        guardBtn.setButtonText ("PHASE GUARD");
+        guardBtn.setTooltip ("Eases the width back if the sound starts cancelling itself, so it stays solid in mono");
+        monoBtn.setButtonText ("MONO CHECK");
+        monoBtn.setTooltip ("Listen in mono, like a phone or club speaker");
+        for (auto* b : { &guardBtn, &monoBtn }) { b->setClickingTogglesState (true); addAndMakeVisible (*b); }
+        guardAttach = std::make_unique<APVTS::ButtonAttachment> (p.state, "guard", guardBtn);
+        monoAttach = std::make_unique<APVTS::ButtonAttachment> (p.state, "monoCheck", monoBtn);
+        setSize (600, 430);
         startTimerHz (30);
     }
 
@@ -414,6 +441,18 @@ public:
         g.drawText ("-1", cm.withY (cm.getBottom() + 2).withHeight (12), juce::Justification::left);
         g.drawText ("CORRELATION " + juce::String (v, 2), cm.withY (cm.getBottom() + 2).withHeight (12), juce::Justification::centred);
         g.drawText ("+1", cm.withY (cm.getBottom() + 2).withHeight (12), juce::Justification::right);
+        const float gg = fx.guardNow.load();
+        if (fx.param ("guard") > 0.5f && gg < 0.97f)
+        {
+            g.setColour (juce::Colour (0xffff4060));
+            g.drawText ("GUARD  -" + juce::String (juce::roundToInt ((1.0f - gg) * 100.0f)) + "% WIDTH", cm.withY (cm.getBottom() + 16).withHeight (12), juce::Justification::centred);
+        }
+        if (fx.param ("monoCheck") > 0.5f)
+        {
+            g.setColour (look.s.pointer);
+            g.setFont (theme::font (12.0f, true));
+            g.drawText ("LISTENING IN MONO", scope.toFloat().withY (scope.getY() - 18.0f).withHeight (14), juce::Justification::centred);
+        }
     }
 
     void resized() override
@@ -424,6 +463,11 @@ public:
         scope = left.removeFromTop (250).reduced (6);
         left.removeFromTop (16);
         corr = left.removeFromTop (16).reduced (6, 0);
+        left.removeFromTop (36);
+        auto btns = left.removeFromTop (28).reduced (6, 0);
+        guardBtn.setBounds (btns.removeFromLeft (btns.getWidth() / 2 - 3));
+        btns.removeFromLeft (6);
+        monoBtn.setBounds (btns);
         r.removeFromLeft (20);
         width.setBounds (r.removeFromTop (190).withSizeKeepingCentre (190, 190));
         r.removeFromTop (14);
@@ -434,6 +478,8 @@ public:
 private:
     WidenerFx& fx;
     Knob width, spread, bass, output;
+    juce::TextButton guardBtn, monoBtn;
+    std::unique_ptr<APVTS::ButtonAttachment> guardAttach, monoAttach;
     juce::Rectangle<int> scope, corr;
 };
 
@@ -727,6 +773,7 @@ juce::AudioProcessorEditor* AmpFx::createEditor() { return new AmpEditor (*this)
 struct KickParams
 {
     float tune = 50, pitch = 24, sweep = 45, decay = 450, click = 40, clickTone = 3500, punch = 40, drive = 20, level = 0;
+    float hold = 0, tail = 0, room = 0;   // big-room extras: hold the body, distort the tail, a little room
     bool keyTrack = false;
 };
 
@@ -755,12 +802,20 @@ struct KickVoice
         phase += f * dt;
         if (phase >= 1.0) phase -= 1.0;
         const double ampTau = juce::jmax (0.005, p.decay / 1000.0 / 6.9);
-        float amp = (float) std::exp (-t / ampTau);
+        const double holdS = p.hold / 1000.0;
+        float amp = (float) std::exp (-juce::jmax (0.0, t - holdS) / ampTau);
         if (t < 0.0006) amp *= (float) (t / 0.0006);
         const float punchGain = 1.0f + p.punch / 100.0f * 1.6f * (float) std::exp (-t / 0.022);
         const float body = (float) std::sin (juce::MathConstants<double>::twoPi * phase) * amp * punchGain;
         const float d = 1.0f + p.drive / 100.0f * 6.0f;
         float y = std::tanh (body * d) / std::tanh (d);
+        if (p.tail > 0.1f)
+        {
+            // the tail (after the first ~30 ms) driven hard: the growl of a big-room kick, while the attack stays clean
+            const float td = 1.0f + p.tail / 100.0f * 12.0f;
+            const float w = juce::jlimit (0.0f, 1.0f, (float) ((t - 0.025) / 0.04)) * p.tail / 100.0f;
+            y = y * (1.0f - w) + w * std::tanh (body * td) / std::tanh (td) * amp / juce::jmax (0.05f, std::abs (amp));
+        }
 
         if (p.click > 0.1f && t < 0.03)
         {
@@ -771,7 +826,7 @@ struct KickVoice
 
         t += dt;
         if (fadeStep > 0) { fade -= fadeStep; if (fade <= 0) active = false; }
-        if (t > p.decay / 1000.0 * 1.6 + 0.05) active = false;
+        if (t > p.decay / 1000.0 * 1.6 + p.hold / 1000.0 + 0.05) active = false;
         return y * vel * fade;
     }
 };
@@ -798,7 +853,19 @@ public:
         l.add (floatParam ("drive", "Drive", Range (0, 100), 20, "%"));
         l.add (floatParam ("level", "Level", Range (-24, 6), -3, "dB"));
         l.add (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { "keyTrack", 1 }, "Key Track", false));
+        l.add (floatParam ("hold", "Hold", skewed (0, 400, 80), 0, "ms"));
+        l.add (floatParam ("tail", "Tail Drive", Range (0, 100), 0, "%"));
+        l.add (floatParam ("room", "Room", Range (0, 100), 0, "%"));
         return l;
+    }
+
+    // one click: everything set for a festival "big room" kick
+    void loadBigRoom()
+    {
+        const std::pair<const char*, float> values[] { { "tune", 52 }, { "pitch", 30 }, { "sweep", 32 }, { "decay", 700 }, { "click", 55 },
+                                                       { "clickTone", 4200 }, { "punch", 75 }, { "drive", 40 }, { "hold", 110 },
+                                                       { "tail", 65 }, { "room", 30 }, { "level", -4 } };
+        for (auto& [id, v] : values) if (auto* rp = state.getParameter (id)) rp->setValueNotifyingHost (rp->convertTo0to1 (v));
     }
 
     KickParams readParams() const
@@ -807,6 +874,7 @@ public:
         p.tune = param ("tune"); p.pitch = param ("pitch"); p.sweep = param ("sweep"); p.decay = param ("decay");
         p.click = param ("click"); p.clickTone = param ("clickTone"); p.punch = param ("punch"); p.drive = param ("drive");
         p.level = param ("level"); p.keyTrack = param ("keyTrack") > 0.5f;
+        p.hold = param ("hold"); p.tail = param ("tail"); p.room = param ("room");
         return p;
     }
 
@@ -820,7 +888,16 @@ public:
         return out;
     }
 
-    void prepareToPlay (double sr, int) override { currentSampleRate = sr; for (auto& v : voices) v.active = false; }
+    void prepareToPlay (double sr, int) override
+    {
+        currentSampleRate = sr;
+        for (auto& v : voices) v.active = false;
+        room.setSampleRate (sr);
+        juce::Reverb::Parameters rp; rp.roomSize = 0.42f; rp.damping = 0.55f; rp.width = 1.0f; rp.wetLevel = 1.0f; rp.dryLevel = 0.0f;
+        room.setParameters (rp);
+        room.reset();
+        roomBuf.setSize (2, 4096);
+    }
     void releaseResources() override {}
 
     void processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi) override
@@ -848,6 +925,14 @@ public:
             y *= gain;
             for (int ch = 0; ch < buffer.getNumChannels(); ++ch) buffer.setSample (ch, i, y);
         }
+        if (p.room > 0.1f && buffer.getNumChannels() >= 2 && n <= roomBuf.getNumSamples())
+        {
+            // the room: a short, bright space behind the kick (the kick itself stays dry and centred)
+            for (int ch = 0; ch < 2; ++ch) roomBuf.copyFrom (ch, 0, buffer, 0, 0, n);
+            room.processStereo (roomBuf.getWritePointer (0), roomBuf.getWritePointer (1), n);
+            const float wet = p.room / 100.0f * 0.35f;
+            for (int ch = 0; ch < 2; ++ch) buffer.addFrom (ch, 0, roomBuf, ch, 0, n, wet);
+        }
     }
 
     std::atomic<bool> audition { false };
@@ -856,6 +941,8 @@ public:
 private:
     std::array<KickVoice, 2> voices;
     int current = 0;
+    juce::Reverb room;
+    juce::AudioBuffer<float> roomBuf;
 
     void trigger (const KickParams& p, int note, float vel)
     {
@@ -876,7 +963,8 @@ public:
           fx (p)
     {
         for (auto [id, name] : { std::pair { "tune", "TUNE" }, { "pitch", "PITCH" }, { "sweep", "SWEEP" }, { "decay", "DECAY" }, { "punch", "PUNCH" },
-                                 { "click", "CLICK" }, { "clickTone", "CLICK TONE" }, { "drive", "DRIVE" }, { "level", "LEVEL" } })
+                                 { "click", "CLICK" }, { "clickTone", "CLICK TONE" }, { "drive", "DRIVE" }, { "level", "LEVEL" },
+                                 { "hold", "HOLD" }, { "tail", "TAIL DRIVE" }, { "room", "ROOM" } })
         {
             auto* k = knobs.add (new Knob (p, id, name));
             k->label.setColour (juce::Label::textColourId, look.s.textDim);
@@ -890,10 +978,14 @@ public:
         keyTrack.setTooltip ("Follow the note played: C2 plays the Tune frequency");
         keyAttach = std::make_unique<APVTS::ButtonAttachment> (p.state, "keyTrack", keyTrack);
         addAndMakeVisible (keyTrack);
+        bigRoom.setButtonText ("BIG ROOM");
+        bigRoom.setTooltip ("Set everything up for a festival big-room kick: held body, growling tail, a little room");
+        bigRoom.onClick = [this] { fx.loadBigRoom(); fx.audition = true; };
+        addAndMakeVisible (bigRoom);
         for (auto* prm : p.getParameters())
             if (auto* r = dynamic_cast<juce::RangedAudioParameter*> (prm)) p.state.addParameterListener (r->paramID, this);
         refreshPreview();
-        setSize (700, 430);
+        setSize (760, 480);
         startTimerHz (15);
     }
 
@@ -974,22 +1066,25 @@ public:
         auto top = r.removeFromTop (150);
         auto side = top.removeFromRight (120);
         display = top.withTrimmedRight (12);
-        play.setBounds (side.removeFromTop (70).reduced (0, 4));
-        side.removeFromTop (8);
+        play.setBounds (side.removeFromTop (56).reduced (0, 4));
+        side.removeFromTop (6);
         keyTrack.setBounds (side.removeFromTop (34));
+        side.removeFromTop (6);
+        bigRoom.setBounds (side.removeFromTop (34));
         r.removeFromTop (14);
+        // the sound on top (tune, pitch, sweep, decay, hold, punch), colour below (click, tone, drive, tail, room, level)
+        const int order1[] { 0, 1, 2, 3, 9, 4 }, order2[] { 5, 6, 7, 10, 11, 8 };
         auto row1 = r.removeFromTop (r.getHeight() / 2);
-        const int w1 = row1.getWidth() / 5;
-        for (int i = 0; i < 5; ++i) knobs[i]->setBounds (row1.removeFromLeft (w1).reduced (6, 0));
-        const int w2 = r.getWidth() / 5;
-        r.removeFromLeft (w2 / 2);
-        for (int i = 5; i < 9; ++i) knobs[i]->setBounds (r.removeFromLeft (w2).reduced (6, 0));
+        const int w1 = row1.getWidth() / 6;
+        for (int i : order1) knobs[i]->setBounds (row1.removeFromLeft (w1).reduced (4, 0));
+        const int w2 = r.getWidth() / 6;
+        for (int i : order2) knobs[i]->setBounds (r.removeFromLeft (w2).reduced (4, 0));
     }
 
 private:
     KickSynthFx& fx;
     juce::OwnedArray<Knob> knobs;
-    juce::TextButton play, keyTrack;
+    juce::TextButton play, keyTrack, bigRoom;
     std::unique_ptr<APVTS::ButtonAttachment> keyAttach;
     juce::Rectangle<int> display;
     std::vector<float> preview;
@@ -1037,6 +1132,8 @@ public:
         l.add (floatParam ("release", "Release", skewed (10, 1000, 100), 70, "ms"));
         l.add (floatParam ("sibilance", "Sibilance", Range (0, 100), 35, "%"));
         l.add (floatParam ("level", "Level", Range (-24, 12), 0, "dB"));
+        l.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "character", 1 }, "Character",
+                   juce::StringArray { "Modern (20 bands)", "Vintage (10 bands)" }, 0));
         return l;
     }
 
@@ -1068,6 +1165,11 @@ public:
         hp1.c = hp2.c = BiquadCoefs::make (BiquadCoefs::Type::HighPass, sr, 6000, 0.707, 0);
         for (auto& v : voices) v = {};
         lastFormant = 1000.0f;
+        lastVintage = -1;
+        // vintage: the bucket-brigade "ensemble" (three slow / fast wobbling delays) and a softer top
+        for (auto& e : ensLine) e.assign (4096, 0.0f);
+        ensPos = 0; ensPh1 = 0; ensPh2 = 0;
+        topL = topR = 0; uvEnv = 0; modEnv = 0;
     }
     void releaseResources() override {}
 
@@ -1081,13 +1183,23 @@ public:
         const double sr = currentSampleRate;
 
         const float formant = param ("formant");
-        if (! juce::approximatelyEqual (formant, lastFormant))
+        const int vintage = param ("character") > 0.5f ? 1 : 0;
+        if (! juce::approximatelyEqual (formant, lastFormant) || vintage != lastVintage)
         {
+            // vintage uses every other band, each twice as wide: fewer, broader, smoother bands
+            const double q = vintage ? bandQ * 0.5 : bandQ;
             const double shift = std::pow (2.0, formant / 12.0);
             for (int i = 0; i < numBands; ++i)
-                bands[(size_t) i].c1.c = bands[(size_t) i].c2.c = BiquadCoefs::make (BiquadCoefs::Type::BandPass, sr, juce::jmin (sr * 0.45, bandFreq (i) * shift), bandQ, 0);
+            {
+                const double f = vintage ? bandFreq (juce::jmin (numBands - 1, i - i % 2)) * std::pow (8000.0 / 120.0, 0.5 / (numBands - 1)) : bandFreq (i);
+                bands[(size_t) i].m1.c = bands[(size_t) i].m2.c = BiquadCoefs::make (BiquadCoefs::Type::BandPass, sr, juce::jmin (sr * 0.45, f), q, 0);
+                bands[(size_t) i].c1.c = bands[(size_t) i].c2.c = BiquadCoefs::make (BiquadCoefs::Type::BandPass, sr, juce::jmin (sr * 0.45, f * shift), q, 0);
+            }
             lastFormant = formant;
+            lastVintage = vintage;
         }
+        const float topK = 1.0f - std::exp (-juce::MathConstants<float>::twoPi * 6500.0f / (float) sr);
+        const float uvAtt = coefFor (5, sr), uvRel = coefFor (60, sr);
         const float tone = param ("tone") / 100.0f, noise = param ("noise") / 100.0f, ens = param ("ensemble") / 100.0f;
         const float att = coefFor (param ("attack"), sr), rel = coefFor (param ("release"), sr);
         const float sib = param ("sibilance") / 100.0f;
@@ -1119,10 +1231,20 @@ public:
             carrier += noise * (rnd.nextFloat() * 2.0f - 1.0f) * juce::jmin (1.0f, activity) * 0.6f;
 
             const float mod = sc != nullptr ? 0.5f * (sc->getSample (0, i) + sc->getSample (1, i)) : 0.0f;
+            const float hissRaw = hp2.process (hp1.process (mod, 0), 0);
+            if (vintage)
+            {
+                // voiced / unvoiced: on "s", "t", "f" the old machines switched the carrier to noise
+                uvEnv += (std::abs (hissRaw) > uvEnv ? uvAtt : uvRel) * (std::abs (hissRaw) - uvEnv);
+                modEnv += (std::abs (mod) > modEnv ? uvAtt : uvRel) * (std::abs (mod) - modEnv);
+                const float uv = juce::jlimit (0.0f, 1.0f, (uvEnv / (modEnv + 1.0e-5f) - 0.15f) * 2.5f);
+                carrier = carrier * (1.0f - 0.7f * uv) + uv * 0.9f * (rnd.nextFloat() * 2.0f - 1.0f) * juce::jmin (1.0f, activity + 0.2f);
+            }
 
             float outL = 0, outR = 0;
             for (int b = 0; b < numBands; ++b)
             {
+                if (vintage && (b % 2) == 1) { bands[(size_t) b].env = 0; continue; }
                 auto& bd = bands[(size_t) b];
                 const float mb = bd.m2.process (bd.m1.process (mod, 0), 0);
                 bd.env += (std::abs (mb) > bd.env ? att : rel) * (std::abs (mb) - bd.env);
@@ -1130,8 +1252,31 @@ public:
                 // alternate bands lean left / right for width
                 if (b % 2 == 0) { outL += cb * 1.15f; outR += cb * 0.85f; } else { outL += cb * 0.85f; outR += cb * 1.15f; }
             }
-            const float hiss = sib * hp2.process (hp1.process (mod, 0), 0) * juce::jmin (1.0f, activity);
+            const float hiss = sib * hissRaw * juce::jmin (1.0f, activity);
             outL = outL * gain + hiss; outR = outR * gain + hiss;
+            if (vintage)
+            {
+                // a softer top, a little saturation, then the ensemble
+                topL += topK * (outL - topL); topR += topK * (outR - topR);
+                const float mono = 0.5f * (std::tanh (topL * 1.2f) + std::tanh (topR * 1.2f)) / 1.2f;
+                ensPh1 = std::fmod (ensPh1 + 0.62 / sr, 1.0); ensPh2 = std::fmod (ensPh2 + 5.9 / sr, 1.0);
+                auto& e = ensLine[0];
+                e[(size_t) ensPos] = mono;
+                float taps[3];
+                for (int k = 0; k < 3; ++k)
+                {
+                    const double ph = k / 3.0;
+                    const double d = sr * (0.0065 + 0.0022 * std::sin ((ensPh1 + ph) * juce::MathConstants<double>::twoPi)
+                                                  + 0.00025 * std::sin ((ensPh2 + ph) * juce::MathConstants<double>::twoPi));
+                    double pos = ensPos - d; while (pos < 0) pos += 4096;
+                    const int i0 = (int) pos; const float fr = (float) (pos - i0);
+                    taps[k] = e[(size_t) (i0 & 4095)] * (1 - fr) + e[(size_t) ((i0 + 1) & 4095)] * fr;
+                }
+                ensPos = (ensPos + 1) & 4095;
+                const float w = 0.35f + 0.5f * ens;
+                outL = mono * (1.0f - w) + w * (taps[0] * 0.7f + taps[1] * 0.3f) * 1.1f;
+                outR = mono * (1.0f - w) + w * (taps[2] * 0.7f + taps[1] * 0.3f) * 1.1f;
+            }
             buffer.setSample (0, i, outL);
             if (chans > 1) buffer.setSample (1, i, outR);
         }
@@ -1147,6 +1292,11 @@ private:
     Biquad hp1, hp2;
     double bandQ = 4.0;
     float lastFormant = 1000.0f;
+    int lastVintage = -1;
+    std::array<std::vector<float>, 1> ensLine;
+    int ensPos = 0;
+    double ensPh1 = 0, ensPh2 = 0;
+    float topL = 0, topR = 0, uvEnv = 0, modEnv = 0;
     juce::Random rnd;
 
     struct Voice { int note = -1; bool gate = false; float env = 0, vel = 0; double p1 = 0, p2 = 0.37; };
@@ -1208,6 +1358,8 @@ public:
             k->label.setColour (juce::Label::textColourId, look.s.text);
             addAndMakeVisible (k);
         }
+        character = std::make_unique<Switch> (p, "character");
+        addAndMakeVisible (*character);
         source.setTooltip ("The track whose sound (usually a vocal) shapes the chords you play on this track");
         source.onChange = [this] { fx.sidechainTrackId = source.getSelectedId() > 1 ? source.getSelectedId() - 1 : 0; };
         addAndMakeVisible (source);
@@ -1246,7 +1398,7 @@ public:
         g.drawText ("RENASOUND  VOCODER", r.getX() + 20, 14, 320, 28, juce::Justification::centredLeft);
         g.setColour (look.s.textDim);
         g.setFont (theme::font (10.5f, true));
-        g.drawText ("20 BAND  /  8 VOICE", r.getX() + 300, 22, 200, 14, juce::Justification::centredLeft);
+        g.drawText (fx.param ("character") > 0.5f ? "10 BAND VINTAGE  /  ENSEMBLE" : "20 BAND  /  8 VOICE", r.getX() + 300, 22, 260, 14, juce::Justification::centredLeft);
         g.drawText ("MODULATOR", source.getBounds().translated (0, -14).withHeight (12), juce::Justification::left);
 
         // band meters: amber LED columns
@@ -1290,7 +1442,9 @@ public:
         auto r = getLocalBounds().reduced (22, 0).reduced (20, 14);
         r.removeFromTop (40);
         auto row = r.removeFromTop (150);
-        source.setBounds (row.removeFromRight (200).withTrimmedTop (60).withHeight (30));
+        auto side = row.removeFromRight (200);
+        source.setBounds (side.withTrimmedTop (20).withHeight (30));
+        character->setBounds (side.withTrimmedTop (84).withHeight (30));
         row.removeFromRight (16);
         meters = row;
         r.removeFromTop (16);
@@ -1302,6 +1456,7 @@ private:
     VocoderFx& fx;
     juce::OwnedArray<Knob> knobs;
     juce::ComboBox source;
+    std::unique_ptr<Switch> character;
     juce::Rectangle<int> meters;
     int refreshCounter = 0;
 
@@ -1768,7 +1923,8 @@ const std::vector<BuiltinFxInfo>& getBuiltinInstrumentList()
     static const std::vector<BuiltinFxInfo> list {
         { "kick",    "Kick Synth", "Synthesised kicks: big room, 808, techno" },
         { "vocoder", "Vocoder",    "Play chords through your vocal (pick the vocal track as modulator)" },
-        { "sampler", "Sampler",    "Play any sound across the keyboard: drop a file or a Library sound on it" } };
+        { "sampler", "Sampler",    "Play any sound across the keyboard: drop a file or a Library sound on it" },
+        { "multisampler", "Multi Sampler", "A real sampled instrument: a folder of notes, an SFZ or a sample library" } };
     return list;
 }
 

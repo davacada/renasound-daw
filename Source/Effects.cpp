@@ -1,4 +1,5 @@
 #include "Effects.h"
+#include "MultiSampler.h"
 #include "SynthFx.h"
 #include "UI/Theme.h"
 #include "DspHelpers.h"
@@ -614,19 +615,30 @@ private:
 const std::vector<BuiltinFxInfo>& getBuiltinFxList()
 {
     static const std::vector<BuiltinFxInfo> list {
-        { "eq",         "EQ",          "Shape the tone: cuts, shelves and a bell" },
-        { "dyneq",      "Dynamic EQ",  "6 bands that can react to the level, with an analyser" },
-        { "tubeeq",     "Tube EQ",     "Vintage passive EQ: boost and cut the lows together, tube warmth" },
-        { "punch",      "Punch",       "Transient shaper and HDR enhancer: more snap, more detail" },
-        { "widener",    "Stereo Widener", "Wider stereo that still sums to mono cleanly" },
-        { "amp",        "Amp",         "Guitar / bass amp with three channels and cabinets" },
-        { "compressor", "Compressor",  "Even out dynamics and add punch" },
-        { "reverb",     "Reverb",      "Put the sound in a room or hall" },
-        { "delay",      "Delay",       "Tempo-synced echoes, with ping-pong" },
-        { "noisegate",  "Noise Gate",  "Silence hiss and bleed between phrases" },
-        { "gater",      "Gater",       "Rhythmic tempo-synced volume chopping" },
-        { "phaser",     "Phaser",      "Sweeping, swirling notches" },
-        { "chorus",     "Chorus",      "Thicken and widen" } };
+        { "eq",         "EQ",          "Shape the tone: cuts, shelves and a bell", "EQ & Tone" },
+        { "dyneq",      "Dynamic EQ",  "6 bands that can react to the level, with an analyser", "EQ & Tone" },
+        { "tubeeq",     "Tube EQ",     "Vintage passive EQ: boost and cut the lows together, tube warmth", "EQ & Tone" },
+        { "coloreq",    "Color EQ",    "Four EQ characters with saturation and auto-gain", "EQ & Tone" },
+        { "compressor", "Compressor",  "Even out dynamics and add punch", "Dynamics" },
+        { "buscomp",    "Bus Compressor", "Glue a mix or a group together", "Dynamics" },
+        { "limiter",    "Limiter",     "A loudness ceiling that nothing gets past", "Dynamics" },
+        { "punch",      "Punch",       "Transient shaper and HDR enhancer: more snap, more detail", "Dynamics" },
+        { "noisegate",  "Noise Gate",  "Silence hiss and bleed between phrases", "Dynamics" },
+        { "deesser",    "De-esser",    "Tame harsh S and T sounds", "Vocal" },
+        { "autotune",   "Auto-Tune",   "Live pitch correction to a key and scale", "Vocal" },
+        { "voiceclean", "Voice Cleaner", "Reduce background noise and room reverb", "Vocal" },
+        { "reverb",     "Reverb",      "Put the sound in a room or hall", "Space" },
+        { "delay",      "Delay",       "Tempo-synced echoes, with ping-pong", "Space" },
+        { "dubdelay",   "Dub Delay",   "Tape echo that can run away into feedback", "Space" },
+        { "widener",    "Stereo Widener", "Wider stereo that still sums to mono cleanly", "Space" },
+        { "chorus",     "Chorus",      "Thicken and widen", "Modulation" },
+        { "phaser",     "Phaser",      "Sweeping, swirling notches", "Modulation" },
+        { "rotary",     "Rotary",      "A spinning speaker cabinet, slow or fast", "Modulation" },
+        { "ringmod",    "Ring Mod",    "Metallic, robotic tones", "Modulation" },
+        { "gater",      "Gater",       "Rhythmic tempo-synced volume chopping", "Modulation" },
+        { "amp",        "Amp",         "Guitar / bass amp with three channels and cabinets", "Character" },
+        { "bitcrusher", "Bit Crusher", "Fewer bits, lower sample rate: lo-fi grit", "Character" },
+        { "subbass",    "Sub Bass",    "Adds a sub an octave below the bass", "Character" } };
     return list;
 }
 
@@ -642,6 +654,7 @@ std::unique_ptr<BuiltinFx> createBuiltinFx (const juce::String& id)
     if (id == "kick")       return createKickSynth();
     if (id == "vocoder")    return createVocoder();
     if (id == "sampler")    return createSampler();
+    if (id == "multisampler") return createMultiSampler();
     if (id == "compressor") return std::make_unique<CompressorFx>();
     if (id == "reverb")     return std::make_unique<ReverbFx>();
     if (id == "delay")      return std::make_unique<DelayFx>();
@@ -649,6 +662,17 @@ std::unique_ptr<BuiltinFx> createBuiltinFx (const juce::String& id)
     if (id == "gater")      return std::make_unique<GaterFx>();
     if (id == "phaser")     return std::make_unique<PhaserFx>();
     if (id == "chorus")     return std::make_unique<ChorusFx>();
+    if (id == "autotune")   return createAutoTune();
+    if (id == "buscomp")    return createBusCompressor();
+    if (id == "coloreq")    return createColorEq();
+    if (id == "voiceclean") return createVoiceCleaner();
+    if (id == "rotary")     return createRotary();
+    if (id == "deesser")    return createDeEsser();
+    if (id == "bitcrusher") return createBitCrusher();
+    if (id == "dubdelay")   return createDubDelay();
+    if (id == "limiter")    return createLimiter();
+    if (id == "ringmod")    return createRingMod();
+    if (id == "subbass")    return createSubBass();
     return nullptr;
 }
 

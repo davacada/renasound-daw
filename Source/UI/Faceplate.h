@@ -271,4 +271,79 @@ protected:
 };
 
 
+namespace facekit
+{
+    inline float logX (double f, juce::Rectangle<float> a) { return a.getX() + a.getWidth() * (float) (std::log (f / 20.0) / std::log (1000.0)); }
+    inline double xToLogF (float x, juce::Rectangle<float> a) { return 20.0 * std::pow (1000.0, juce::jlimit (0.0, 1.0, (double) ((x - a.getX()) / a.getWidth()))); }
+
+    inline void title (juce::Graphics& g, juce::Rectangle<int> r, const juce::String& name, const juce::String& sub, juce::Colour c, juce::Colour subC, float size = 21.0f)
+    {
+        const auto f = juce::Font (juce::FontOptions (size, juce::Font::bold)).withExtraKerningFactor (0.08f);
+        g.setFont (f);
+        g.setColour (c);
+        g.drawText (name, r, juce::Justification::centredLeft);
+        g.setColour (subC);
+        g.setFont (theme::font (10.5f, true));
+        g.drawText (sub, r.withTrimmedLeft (juce::roundToInt (juce::GlyphArrangement::getStringWidth (f, name)) + 14), juce::Justification::centredLeft);
+    }
+
+    inline void noiseTexture (juce::Graphics& g, juce::Rectangle<int> r, int seed, float alpha)
+    {
+        juce::Random rnd (seed);
+        for (int i = 0; i < r.getWidth() * r.getHeight() / 14; ++i)
+        {
+            g.setColour ((rnd.nextBool() ? juce::Colours::white : juce::Colours::black).withAlpha (rnd.nextFloat() * alpha));
+            g.fillRect ((float) (r.getX() + rnd.nextInt (r.getWidth())), (float) (r.getY() + rnd.nextInt (r.getHeight())), 1.4f, 1.4f);
+        }
+    }
+}
+
+// A faceplate with a row (or rows) of knobs under a display
+class EffectFace : public FaceEditor
+{
+public:
+    EffectFace (BuiltinFx& p, Skin sk) : FaceEditor (p, sk), fx (p) {}
+
+protected:
+    BuiltinFx& fx;
+    juce::OwnedArray<Knob> knobs;
+    juce::OwnedArray<Switch> switches;
+    juce::OwnedArray<juce::TextButton> toggles;
+    juce::OwnedArray<APVTS::ButtonAttachment> toggleAttach;
+
+    Knob* knob (const char* id, const char* name, juce::Colour labelColour, int box = 64)
+    {
+        auto* k = knobs.add (new Knob (fx, id, name, box));
+        addAndMakeVisible (k);
+        k->sendLookAndFeelChange();   // so the value box picks up this skin's colours
+        k->label.setColour (juce::Label::textColourId, labelColour);
+        return k;
+    }
+    Switch* choice (const char* id)
+    {
+        auto* s = switches.add (new Switch (fx, id));
+        addAndMakeVisible (s);
+        s->sendLookAndFeelChange();
+        return s;
+    }
+    juce::TextButton* toggle (const char* id, const juce::String& text)
+    {
+        auto* b = toggles.add (new juce::TextButton (text));
+        b->setClickingTogglesState (true);
+        toggleAttach.add (new APVTS::ButtonAttachment (fx.state, id, *b));
+        addAndMakeVisible (b);
+        b->sendLookAndFeelChange();
+        return b;
+    }
+    void row (juce::Rectangle<int> r, int from, int to)
+    {
+        const int n = to - from;
+        if (n <= 0) return;
+        const int w = r.getWidth() / n;
+        for (int i = from; i < to; ++i) knobs[i]->setBounds (r.removeFromLeft (w).reduced (3, 0));
+    }
+    float p (const char* id) const { return fx.param (id); }
+};
+
+
 } // namespace rs

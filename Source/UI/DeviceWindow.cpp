@@ -39,8 +39,16 @@ void devicemenus::showAddEffectMenu (AppContext& ctx, int trackId, juce::Compone
 
     juce::PopupMenu menu;
     menu.addSectionHeader ("RENASOUND EFFECTS");
-    for (auto& fx : getBuiltinFxList())
-        menu.addItem (fx.name, [add, fx] { add ("builtin:" + fx.id, nullptr, fx.name); });
+    juce::StringArray cats;
+    for (auto& fx : getBuiltinFxList()) cats.addIfNotAlreadyThere (fx.category);
+    for (auto& cat : cats)
+    {
+        juce::PopupMenu sub;
+        for (auto& fx : getBuiltinFxList())
+            if (fx.category == cat)
+                sub.addItem (fx.name, [add, fx] { add ("builtin:" + fx.id, nullptr, fx.name); });
+        menu.addSubMenu (cat, sub);
+    }
 
     menu.addSectionHeader ("PLUGINS");
     const auto plugins = ctx.engine.pluginHost.getEffects();

@@ -6,6 +6,18 @@ A Mixcraft-style music DAW for **macOS and Windows**, written in C++ with JUCE.
 
 ![RENASOUND](docs/screenshot.png)
 
+## What's new in 0.13
+
+- **Eleven new effects**, each with its own live panel, and the add-effect menu is now grouped (EQ & Tone, Dynamics, Vocal, Space, Modulation, Character):
+  - **Auto-Tune**: live pitch correction to a key and scale (or your own notes), with retune speed, humanize, amount and transpose, and a graph of your pitch and the corrected one.
+  - **Voice Cleaner**: takes background noise and room reverb out of a voice (it learns the noise by itself, or hold *Learn noise*), with "What's removed" to hear the difference.
+  - **Bus Compressor** (glue for a mix or group, with a gain-reduction history and a delta listen) and **Color EQ** (four EQ characters, saturation, auto-gain, draggable curve).
+  - **De-esser, Limiter, Rotary** (spinning speaker), **Dub Delay** (tape echo that can run away), **Bit Crusher, Ring Mod, Sub Bass**.
+- **RENASYNTH** gets a **mod matrix** (4 slots: LFOs, envelopes, velocity, note, mod wheel, aftertouch or random, to 15 destinations, with a live amount bar), a **second LFO**, and three filter types: **Ladder**, **Warm LP** and **Notch**. Three new sounds use them: Acid Ladder, Evolving Pad, Vibrato Lead (mod wheel adds the vibrato).
+- **Multi Sampler**, a new instrument for real sampled instruments: zones, velocity layers, round robins, articulations (buttons or keyswitches) and release sounds. Load a folder and it maps the sounds by their names ("Violin A3 mf RR2", "Cis2", "Eb4", "pp", "ff", "RR1"), listens to them to fix libraries that number octaves differently, and puts each articulation on its own keyswitch. Also opens **SFZ** instruments, and reads **NCW** sample files, so a sample library you own can be played straight from its folder (pick the folder or its .nki). Nothing is copied.
+- **Stereo Widener**: Phase Guard (eases the width back if the sound starts cancelling in mono) and Mono Check. **Kick Synth**: Hold, Tail Drive and Room, plus a one-click **Big Room** setting. **Vocoder**: a **Vintage** character (10 broad bands, voiced/unvoiced switching, ensemble).
+- Value boxes under the knobs now take each panel's own colours.
+
 ## What's new in 0.12
 
 - **Your Ableton Live sounds in the Library:** RENASOUND finds an installed Live's Core Library, Packs and User Library (also where Live's settings say they've been moved) and lists their samples under ABLETON LIVE, with a menu entry per pack. Nothing is copied: the sounds are used where they are, through your own Live licence.
@@ -260,7 +272,14 @@ Source/
   AudioEngine.*       playback, recording, metronome, preview, mixdown, plugin hosting
   Effects.*           the built-in effects and their knob editor
   StudioEq.cpp        Dynamic EQ (with its own editor and analyser) and Tube EQ
-  Devices.*           Punch, Stereo Widener, Amp, Kick Synth, Vocoder and their faceplates
+  Devices.*           Punch, Stereo Widener, Amp, Kick Synth, Vocoder, Sampler and their faceplates
+  Faceplates.cpp      the faceplates of the original effects (EQ, compressor, reverb ...)
+  Fx2.cpp             Auto-Tune, Bus Compressor, Color EQ, Voice Cleaner
+  Fx3.cpp             Rotary, De-esser, Bit Crusher, Dub Delay, Limiter, Ring Mod, Sub Bass
+  SynthFx.cpp         RENASYNTH: oscillators, filters, envelopes, 2 LFOs, mod matrix, its panel
+  MultiSampler.*      the Multi Sampler: name mapping, SFZ, zones / layers / round robins, its panel
+  NcwReader.h         reads NCW sample files
+  Export.*            mixdown files: WAV / AIFF / FLAC / Ogg, tags and cover art
   DspHelpers.h        biquad filters and parameter helpers
   Pitch.*             note detection (YIN), PSOLA pitch shifting, background service
   MixcraftImport.*    reads Mixcraft .mx projects

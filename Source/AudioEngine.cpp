@@ -1,4 +1,5 @@
 #include "AudioEngine.h"
+#include "MultiSampler.h"
 #include "Export.h"
 #include "Devices.h"
 #include "Drums.h"
@@ -1107,6 +1108,15 @@ void AudioEngine::captureLiveNotes (const juce::MidiBuffer& live, double blockSt
 bool AudioEngine::renderMix (juce::AudioBuffer<float>& out, int soloTrackId, bool withMaster, const std::function<bool (double)>& progress, juce::String& error)
 {
     if (project.getEndBeat() <= 0) { error = "The project is empty."; return false; }
+    // sample libraries still loading (just after opening a project): wait for them, up to a minute
+    for (int waited = 0; waited < 600; ++waited)
+    {
+        bool busy = false;
+        for (auto& t : project.tracks) if (t->instrument && t->instrument->processor) busy = busy || multiSamplerIsLoading (t->instrument->processor.get());
+        if (! busy) break;
+        if (progress && ! progress (0.0)) { error = "Cancelled"; return false; }
+        juce::Thread::sleep (100);
+    }
     const juce::ScopedLock sl (project.lock);   // the live callback goes silent while we render
 
     const double songSec = project.getEndBeat() * 60.0 / project.bpm;

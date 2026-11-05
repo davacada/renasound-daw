@@ -75,13 +75,26 @@ protected:
     std::optional<double> getPpq() const;
 };
 
-struct BuiltinFxInfo { juce::String id, name, description; };
+struct BuiltinFxInfo { juce::String id, name, description, category; };
 const std::vector<BuiltinFxInfo>& getBuiltinFxList();
 std::unique_ptr<BuiltinFx> createBuiltinFx (const juce::String& id);
 std::unique_ptr<BuiltinFx> createDynamicEq();   // StudioEq.cpp
 
 // Each built-in effect's own faceplate (Faceplates.cpp); nullptr = the generic knob panel
 juce::AudioProcessorEditor* createFaceplate (BuiltinFx&);
+juce::AudioProcessorEditor* createFaceplate2 (BuiltinFx&);   // Fx2.cpp
+juce::AudioProcessorEditor* createFaceplate3 (BuiltinFx&);   // Fx3.cpp
+std::unique_ptr<BuiltinFx> createAutoTune();
+std::unique_ptr<BuiltinFx> createBusCompressor();
+std::unique_ptr<BuiltinFx> createColorEq();
+std::unique_ptr<BuiltinFx> createVoiceCleaner();
+std::unique_ptr<BuiltinFx> createRotary();
+std::unique_ptr<BuiltinFx> createDeEsser();
+std::unique_ptr<BuiltinFx> createBitCrusher();
+std::unique_ptr<BuiltinFx> createDubDelay();
+std::unique_ptr<BuiltinFx> createLimiter();
+std::unique_ptr<BuiltinFx> createRingMod();
+std::unique_ptr<BuiltinFx> createSubBass();
 std::unique_ptr<BuiltinFx> createTubeEq();
 
 } // namespace rs

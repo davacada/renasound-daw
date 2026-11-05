@@ -1,4 +1,5 @@
 #include "SynthFx.h"
+#include <complex>
 #include "DspHelpers.h"
 #include "UI/Faceplate.h"
 
@@ -8,9 +9,36 @@ namespace rs
 namespace
 {
     const juce::StringArray oscWaves { "Sine", "Triangle", "Saw", "Square", "Noise" };
-    const juce::StringArray filterTypes { "LP 24", "LP 12", "High-pass", "Band-pass" };
+    // (new types go at the end: saved sounds store the type's number)
+    const juce::StringArray filterTypes { "LP 24", "LP 12", "High-pass", "Band-pass", "Ladder", "Warm LP", "Notch" };
     const juce::StringArray lfoWaves { "Sine", "Triangle", "Saw", "Square", "Random" };
     const juce::StringArray lfoTargets { "Pitch", "Filter", "Volume", "Shape", "Pan" };
+
+    // ---- the mod matrix: any source to any destination ----
+    enum ModSrc { SrcNone, SrcLfo1, SrcLfo2, SrcFiltEnv, SrcAmpEnv, SrcVelocity, SrcNote, SrcModWheel, SrcAftertouch, SrcRandom, NumSrc };
+    enum ModDst { DstNone, DstPitch, DstFilter, DstReso, DstVolume, DstPan, DstShape1, DstShape2, DstOsc2Pitch, DstOscMix,
+                  DstDetune, DstDrive, DstLfo1Rate, DstLfo2Rate, DstLfo1Amount, DstLfo2Amount, NumDst };
+    const juce::StringArray modSources { "None", "LFO 1", "LFO 2", "Filter Env", "Amp Env", "Velocity", "Note", "Mod Wheel", "Aftertouch", "Random" };
+    const juce::StringArray modDests { "None", "Pitch", "Filter", "Resonance", "Volume", "Pan", "Osc 1 Shape", "Osc 2 Shape", "Osc 2 Pitch",
+                                       "Osc Mix", "Detune", "Drive", "LFO 1 Rate", "LFO 2 Rate", "LFO 1 Amount", "LFO 2 Amount" };
+    constexpr int modSlots = 4;
+    const char* const modSrcIds[] { "m1src", "m2src", "m3src", "m4src" };
+    const char* const modDstIds[] { "m1dst", "m2dst", "m3dst", "m4dst" };
+    const char* const modAmtIds[] { "m1amt", "m2amt", "m3amt", "m4amt" };
+
+    float lfoShape (int wave, double ph, float held)
+    {
+        switch (wave)
+        {
+            case 0: return (float) std::sin (ph * juce::MathConstants<double>::twoPi);
+            case 1: return (float) (ph < 0.5 ? 4.0 * ph - 1.0 : 3.0 - 4.0 * ph);
+            case 2: return (float) (1.0 - 2.0 * ph);
+            case 3: return ph < 0.5 ? 1.0f : -1.0f;
+            default: return held;
+        }
+    }
+    // a quick tanh for the filters' saturation
+    inline float softClip (float x) { x = juce::jlimit (-3.0f, 3.0f, x); return x * (27.0f + x * x) / (27.0f + 9.0f * x * x); }
 
     std::unique_ptr<juce::AudioParameterChoice> choiceParam (const char* id, const char* name, const juce::StringArray& items, int def)
     {
@@ -140,7 +168,23 @@ namespace
                                { "lfodepth", 8 }, { "lfotarget", 0 }, { "volume", -8 } } },
             { "Warm Strings",{ { "o1wave", 2 }, { "o2wave", 2 }, { "o2fine", 9 }, { "unison", 5 }, { "detune", 18 }, { "width", 70 }, { "cutoff", 2500 },
                                { "aa", 300 }, { "ad", 400 }, { "as", 90 }, { "ar", 900 }, { "lfowave", 0 }, { "lforate", 5.5f }, { "lfodepth", 6 },
-                               { "lfotarget", 0 }, { "volume", -10 } } } };
+                               { "lfotarget", 0 }, { "volume", -10 } } },
+            { "Acid Ladder", { { "o1wave", 2 }, { "o2level", 0 }, { "ftype", 4 }, { "cutoff", 380 }, { "reso", 78 }, { "fenv", 55 }, { "fd", 220 },
+                               { "fs", 0 }, { "drive", 35 }, { "glide", 60 }, { "aa", 1 }, { "ad", 300 }, { "as", 70 }, { "ar", 90 },
+                               { "m1src", SrcVelocity }, { "m1dst", DstFilter }, { "m1amt", 25 }, { "volume", -7 } } },
+            { "Evolving Pad",{ { "o1wave", 2 }, { "o2wave", 1 }, { "o2oct", 1 }, { "o2level", 40 }, { "unison", 5 }, { "detune", 22 }, { "width", 90 },
+                               { "ftype", 5 }, { "cutoff", 1100 }, { "reso", 25 }, { "aa", 900 }, { "ad", 800 }, { "as", 85 }, { "ar", 1800 },
+                               { "lfowave", 1 }, { "lforate", 0.15f }, { "lfodepth", 35 }, { "lfotarget", 1 },
+                               { "lfo2wave", 0 }, { "lfo2rate", 0.08f }, { "lfo2depth", 0 },
+                               { "m1src", SrcLfo2 }, { "m1dst", DstShape1 }, { "m1amt", 60 },
+                               { "m2src", SrcRandom }, { "m2dst", DstPan }, { "m2amt", 45 },
+                               { "m3src", SrcLfo2 }, { "m3dst", DstOscMix }, { "m3amt", 50 }, { "volume", -6 } } },
+            { "Vibrato Lead",{ { "o1wave", 3 }, { "o1shape", 30 }, { "o2wave", 2 }, { "o2fine", 7 }, { "o2level", 40 }, { "ftype", 4 }, { "cutoff", 2400 },
+                               { "reso", 30 }, { "fenv", 20 }, { "glide", 80 }, { "aa", 8 }, { "ad", 200 }, { "as", 85 }, { "ar", 220 },
+                               { "lfo2wave", 0 }, { "lfo2rate", 5.5f }, { "lfo2depth", 0 },
+                               { "m1src", SrcLfo2 }, { "m1dst", DstPitch }, { "m1amt", 3 },
+                               { "m2src", SrcModWheel }, { "m2dst", DstLfo2Amount }, { "m2amt", 100 },
+                               { "m3src", SrcAftertouch }, { "m3dst", DstFilter }, { "m3amt", 30 }, { "volume", -9 } } } };
         return list;
     }
 }
@@ -208,6 +252,18 @@ public:
         l.add (floatParam ("lforate", "LFO Rate", skewed (0.05f, 20, 2), 2, "Hz"));
         l.add (floatParam ("lfodepth", "LFO Depth", Range (0, 100), 0, "%"));
         l.add (choiceParam ("lfotarget", "LFO Target", lfoTargets, 1));
+        l.add (choiceParam ("lfo2wave", "LFO 2 Wave", lfoWaves, 0));
+        l.add (floatParam ("lfo2rate", "LFO 2 Rate", skewed (0.05f, 20, 2), 0.5f, "Hz"));
+        l.add (floatParam ("lfo2depth", "LFO 2 Depth", Range (0, 100), 0, "%"));
+        l.add (choiceParam ("lfo2target", "LFO 2 Target", lfoTargets, 3));
+        for (int i = 0; i < modSlots; ++i)
+        {
+            const juce::String n ("Mod " + juce::String (i + 1));
+            l.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { modSrcIds[i], 1 }, n + " Source", modSources, 0));
+            l.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { modDstIds[i], 1 }, n + " Destination", modDests, 0));
+            l.add (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { modAmtIds[i], 1 }, n + " Amount", Range (-100, 100), 0.0f,
+                       juce::AudioParameterFloatAttributes().withLabel ("%")));
+        }
         l.add (floatParam ("volume", "Volume", Range (-36, 6), -8, "dB"));
         return l;
     }
@@ -231,6 +287,8 @@ public:
     std::atomic<int> scopePos { 0 };
     std::atomic<float> ampLevel { 0 }, filterLevel { 0 }, liveCutoff { 0 }, lfoValue { 0 }, lfoPhase { 0 }, oscPhase { 0 };
     std::atomic<int> ampStage { 0 }, voicesPlaying { 0 };
+    std::atomic<float> lfo2Value { 0 }, lfo2Phase { 0 }, modWheelNow { 0 }, aftertouchNow { 0 };
+    std::array<std::atomic<float>, 4> slotNow {};   // what each mod slot is doing right now (newest note)
     std::atomic<bool> audition { false };
     std::atomic<int> auditionNote { 60 };
 
@@ -264,6 +322,9 @@ public:
                 if (m.isNoteOn()) noteOn (m.getNoteNumber(), m.getFloatVelocity());
                 else if (m.isNoteOff()) noteOff (m.getNoteNumber());
                 else if (m.isAllNotesOff() || m.isAllSoundOff()) for (auto& v : voices) { v.amp.off(); v.filt.off(); }
+                else if (m.isControllerOfType (1)) modWheel = m.getControllerValue() / 127.0f;
+                else if (m.isChannelPressure()) chanPressure = m.getChannelPressureValue() / 127.0f;
+                else if (m.isAftertouch()) { for (auto& v : voices) if (v.note == m.getNoteNumber()) v.pressure = m.getAfterTouchValue() / 127.0f; }
                 ++it;
             }
             if ((i & 15) == 0) tickControl();
@@ -298,6 +359,10 @@ public:
         else { ampLevel = 0; ampStage = 0; filterLevel = 0; liveCutoff = pCutoff; }
         lfoValue = lfoOut;
         lfoPhase = (float) lfoPh;
+        lfo2Value = lfo2Out;
+        lfo2Phase = (float) lfo2Ph;
+        modWheelNow = modWheel; aftertouchNow = chanPressure;
+        for (int sl = 0; sl < modSlots; ++sl) slotNow[(size_t) sl] = newest != nullptr ? newest->slotVal[sl] : globalSlotVal[sl];
     }
 
 private:
@@ -313,12 +378,21 @@ private:
         float s1[2][2] {}, s2[2][2] {};   // filter state [channel][stage]
         float g = 0.1f, k = 1.0f, cutoffNow = 1000;
         float noiseLp = 0;
+        float ld[2][4] {};        // ladder stages
+        float ladderOut[2] {};
+        float pressure = 0, rndVal = 0;
+        // set every 16 samples from the LFOs, envelopes and the mod matrix
+        double mul1 = 1, mul2 = 1;
+        float sh1 = 0, sh2 = 0, lvl1 = 0.8f, lvl2 = 0.5f, det = 15, volMod = 1, panL = 1, panR = 1, drive = 0;
+        float slotVal[4] {};
     };
     std::array<Voice, 16> voices;
     juce::int64 counter = 0;
     double lastFreq = 0;
-    double lfoPh = 0;
-    float lfoOut = 0, sh = 0;
+    double lfoPh = 0, lfo2Ph = 0;
+    float lfoOut = 0, sh = 0, lfo2Out = 0, sh2 = 0;
+    float modWheel = 0, chanPressure = 0;
+    float globalSlotVal[4] {};
     int scopeDecim = 0, auditionUntil = 0;
     juce::Random rnd;
 
@@ -327,6 +401,10 @@ private:
     float pOct1 = 0, pShape1 = 0, pLvl1 = 0.8f, pOct2 = 0, pSemi2 = 0, pFine2 = 0, pShape2 = 0, pLvl2 = 0.5f, pSub = 0, pNoise = 0;
     float pDetune = 15, pWidth = 0.6f, pGlide = 0, pCutoff = 4000, pReso = 0.2f, pFenv = 0, pKey = 0.3f, pDrive = 0;
     float pLfoRate = 2, pLfoDepth = 0, gain = 1;
+    int pLfo2Wave = 0, pLfo2Target = 3;
+    float pLfo2Rate = 0.5f, pLfo2Depth = 0;
+    int mSrc[4] {}, mDst[4] {};
+    float mAmt[4] {};
 
     void readParams()
     {
@@ -338,6 +416,12 @@ private:
         pGlide = param ("glide"); pFType = (int) param ("ftype"); pCutoff = param ("cutoff"); pReso = param ("reso") * 0.01f;
         pFenv = param ("fenv") * 0.01f; pKey = param ("fkey") * 0.01f; pDrive = param ("drive") * 0.01f;
         pLfoWave = (int) param ("lfowave"); pLfoRate = param ("lforate"); pLfoDepth = param ("lfodepth") * 0.01f; pLfoTarget = (int) param ("lfotarget");
+        pLfo2Wave = (int) param ("lfo2wave"); pLfo2Rate = param ("lfo2rate"); pLfo2Depth = param ("lfo2depth") * 0.01f; pLfo2Target = (int) param ("lfo2target");
+        for (int i = 0; i < modSlots; ++i)
+        {
+            mSrc[i] = (int) param (modSrcIds[i]); mDst[i] = (int) param (modDstIds[i]); mAmt[i] = param (modAmtIds[i]) * 0.01f;
+            if (mSrc[i] == SrcNone || mDst[i] == DstNone) mAmt[i] = 0;
+        }
         gain = juce::Decibels::decibelsToGain (param ("volume")) / std::sqrt ((float) pUnison) * 0.7f;
         for (auto& v : voices)
         {
@@ -368,9 +452,13 @@ private:
             for (int u = 0; u < 7; ++u) { v->ph1[(size_t) u] = rnd.nextDouble(); v->ph2[(size_t) u] = rnd.nextDouble(); }
             v->phSub = 0;
             std::memset (v->s1, 0, sizeof (v->s1)); std::memset (v->s2, 0, sizeof (v->s2));
+            std::memset (v->ld, 0, sizeof (v->ld)); v->ladderOut[0] = v->ladderOut[1] = 0;
+            v->pressure = 0;
             v->amp.level = 0; v->filt.level = 0;
         }
+        v->rndVal = rnd.nextFloat() * 2.0f - 1.0f;   // the "Random" source: new for every note
         v->amp.on(); v->filt.on();
+        updateVoiceMods (*v);   // so the first samples already sound right
     }
 
     void noteOff (int note)
@@ -378,33 +466,151 @@ private:
         for (auto& v : voices) if (v.note == note && v.amp.stage != Env::Release) { v.amp.off(); v.filt.off(); }
     }
 
-    // every 16 samples: LFO, glide and filter coefficients
+    // the global sources (the same for every note)
+    float globalSource (int src) const
+    {
+        switch (src)
+        {
+            case SrcLfo1: return lfoOut * lfo1Amount;
+            case SrcLfo2: return lfo2Out * lfo2Amount;
+            case SrcModWheel: return modWheel;
+            case SrcAftertouch: return chanPressure;
+            default: return 0.0f;
+        }
+    }
+    float voiceSource (const Voice& v, int src) const
+    {
+        switch (src)
+        {
+            case SrcFiltEnv: return v.filt.level;
+            case SrcAmpEnv: return v.amp.level;
+            case SrcVelocity: return v.vel;
+            case SrcNote: return (float) (v.note - 60) / 24.0f;
+            case SrcAftertouch: return juce::jmax (chanPressure, v.pressure);
+            case SrcRandom: return v.rndVal;
+            default: return globalSource (src);
+        }
+    }
+    float lfo1Amount = 0, lfo2Amount = 0;
+
+    // every 16 samples: LFOs, glide, filter coefficients and everything the matrix moves
     void tickControl()
     {
         const double step = 16.0 / currentSampleRate;
-        const double prev = lfoPh;
-        lfoPh += pLfoRate * step;
-        if (lfoPh >= 1.0) lfoPh -= 1.0;
-        switch (pLfoWave)
+
+        // LFO rates and amounts can be moved by the global sources (not per note)
+        float r1 = 0, r2 = 0, a1 = 0, a2 = 0;
+        for (int i = 0; i < modSlots; ++i)
         {
-            case 0: lfoOut = (float) std::sin (lfoPh * juce::MathConstants<double>::twoPi); break;
-            case 1: lfoOut = (float) (lfoPh < 0.5 ? 4.0 * lfoPh - 1.0 : 3.0 - 4.0 * lfoPh); break;
-            case 2: lfoOut = (float) (1.0 - 2.0 * lfoPh); break;
-            case 3: lfoOut = lfoPh < 0.5 ? 1.0f : -1.0f; break;
-            default: if (lfoPh < prev) sh = rnd.nextFloat() * 2.0f - 1.0f; lfoOut = sh; break;
+            if (mAmt[i] == 0.0f) continue;
+            const float m = globalSource (mSrc[i]) * mAmt[i];
+            globalSlotVal[i] = m;
+            switch (mDst[i])
+            {
+                case DstLfo1Rate: r1 += m; break;
+                case DstLfo2Rate: r2 += m; break;
+                case DstLfo1Amount: a1 += m; break;
+                case DstLfo2Amount: a2 += m; break;
+                default: break;
+            }
         }
+        // LFO amount: normally full. A positive "Amount" route fades it in from nothing (mod wheel vibrato);
+        // a negative one turns it down from full.
+        bool fadeIn1 = false, fadeIn2 = false;
+        for (int i = 0; i < modSlots; ++i)
+        {
+            fadeIn1 = fadeIn1 || (mDst[i] == DstLfo1Amount && mAmt[i] > 0);
+            fadeIn2 = fadeIn2 || (mDst[i] == DstLfo2Amount && mAmt[i] > 0);
+        }
+        lfo1Amount = juce::jlimit (0.0f, 1.0f, (fadeIn1 ? 0.0f : 1.0f) + a1);
+        lfo2Amount = juce::jlimit (0.0f, 1.0f, (fadeIn2 ? 0.0f : 1.0f) + a2);
+
+        auto advance = [&] (double& ph, float rate, int wave, float& held, float& out)
+        {
+            const double prev = ph;
+            ph += rate * step;
+            if (ph >= 1.0) ph -= 1.0;
+            if (wave == 4 && ph < prev) held = rnd.nextFloat() * 2.0f - 1.0f;
+            out = lfoShape (wave, ph, held);
+        };
+        advance (lfoPh, pLfoRate * std::pow (2.0f, r1 * 3.0f), pLfoWave, sh, lfoOut);
+        advance (lfo2Ph, pLfo2Rate * std::pow (2.0f, r2 * 3.0f), pLfo2Wave, sh2, lfo2Out);
+
         const float glideK = pGlide > 0.5f ? (float) std::exp (-step / (pGlide * 0.001 / 4.6)) : 0.0f;
         for (auto& v : voices)
         {
             if (! v.amp.active()) continue;
             v.freq = v.target + (v.freq - v.target) * glideK;
-            float oct = pFenv * 5.0f * v.filt.level + pKey * (float) (v.note - 60) / 12.0f;
-            if (pLfoTarget == 1) oct += lfoOut * pLfoDepth * 2.5f;
-            const float fc = juce::jlimit (20.0f, (float) currentSampleRate * 0.45f, pCutoff * std::pow (2.0f, oct));
-            v.cutoffNow = fc;
-            v.g = std::tan (juce::MathConstants<float>::pi * fc / (float) currentSampleRate);
-            v.k = 2.0f - 1.96f * pReso;
+            updateVoiceMods (v);
         }
+    }
+
+    void updateVoiceMods (Voice& v)
+    {
+        float m[NumDst] {};
+        for (int i = 0; i < modSlots; ++i)
+        {
+            if (mAmt[i] == 0.0f) { v.slotVal[i] = 0; continue; }
+            const float val = voiceSource (v, mSrc[i]) * mAmt[i];
+            v.slotVal[i] = val;
+            m[mDst[i]] += val;
+        }
+        // the two LFOs' own quick routes (amounts as before)
+        float trem = 1.0f;
+        auto quick = [&] (int target, float out, float depth)
+        {
+            if (depth <= 0) return;
+            switch (target)
+            {
+                case 0: m[DstPitch] += out * depth * 2.0f / 12.0f; break;   // up to 2 semitones
+                case 1: m[DstFilter] += out * depth * 0.5f; break;          // up to 2.5 octaves
+                case 2: trem *= 1.0f - depth * 0.5f * (1.0f - out); break;
+                case 3: m[DstShape1] += out * depth * 0.5f; m[DstShape2] += out * depth * 0.5f; break;
+                case 4: m[DstPan] += out * depth; break;
+                default: break;
+            }
+        };
+        quick (pLfoTarget, lfoOut * lfo1Amount, pLfoDepth);
+        quick (pLfo2Target, lfo2Out * lfo2Amount, pLfo2Depth);
+
+        // pitch: matrix 100% = an octave
+        v.mul1 = std::pow (2.0, (double) pOct1 + m[DstPitch]);
+        v.mul2 = std::pow (2.0, (double) pOct2 + (pSemi2 + pFine2 * 0.01) / 12.0 + m[DstPitch] + m[DstOsc2Pitch]);
+        v.sh1 = juce::jlimit (0.0f, 1.0f, pShape1 + m[DstShape1]);
+        v.sh2 = juce::jlimit (0.0f, 1.0f, pShape2 + m[DstShape2]);
+        const float mix = juce::jlimit (-1.0f, 1.0f, m[DstOscMix]);   // + towards osc 2, - towards osc 1
+        v.lvl1 = pLvl1 * (1.0f - juce::jmax (0.0f, mix));
+        v.lvl2 = pLvl2 * (1.0f + juce::jmin (0.0f, mix));
+        v.det = juce::jlimit (0.0f, 100.0f, pDetune + m[DstDetune] * 100.0f);
+        v.drive = juce::jlimit (0.0f, 1.0f, pDrive + m[DstDrive]);
+        v.volMod = trem * juce::jlimit (0.0f, 2.0f, 1.0f + m[DstVolume]);
+        const float pan = juce::jlimit (-1.0f, 1.0f, m[DstPan]);
+        v.panL = 1.0f - juce::jmax (0.0f, pan); v.panR = 1.0f + juce::jmin (0.0f, pan);
+
+        // filter: matrix 100% = 5 octaves
+        const float oct = pFenv * 5.0f * v.filt.level + pKey * (float) (v.note - 60) / 12.0f + m[DstFilter] * 5.0f;
+        const float fc = juce::jlimit (20.0f, (float) currentSampleRate * 0.45f, pCutoff * std::pow (2.0f, oct));
+        v.cutoffNow = fc;
+        v.g = std::tan (juce::MathConstants<float>::pi * fc / (float) currentSampleRate);
+        const float reso = juce::jlimit (0.0f, 1.0f, pReso + m[DstReso]);
+        v.k = pFType == 4 ? 3.9f * reso : 2.0f - 1.96f * reso;   // the ladder uses feedback (4 = it sings), the others damping
+    }
+
+    // a 4-stage transistor-ladder style low-pass: saturating input and feedback, sings at high resonance
+    float ladder (float x, Voice& v, int ch, float scale)
+    {
+        const float G = v.g / (1.0f + v.g);
+        float u = softClip ((x - v.k * v.ladderOut[ch]) * scale) / scale;
+        auto& st = v.ld[ch];
+        for (int i = 0; i < 4; ++i)
+        {
+            const float vv = (u - st[i]) * G;
+            const float y = vv + st[i];
+            st[i] = y + vv;
+            u = y;
+        }
+        v.ladderOut[ch] = u;
+        return u * (1.0f + v.k * 0.45f);   // keep the low end as resonance goes up
     }
 
     float svf (float x, float (&s)[2], float g, float k, int mode)
@@ -415,18 +621,14 @@ private:
         const float v2 = s[1] + g * v1;
         s[0] = 2.0f * v1 - s[0];
         s[1] = 2.0f * v2 - s[1];
-        return mode == 0 ? v2 : mode == 1 ? x - k * v1 - v2 : v1;   // low / high / band
+        return mode == 0 ? v2 : mode == 1 ? x - k * v1 - v2 : mode == 2 ? v1 : x - k * v1;   // low / high / band / notch
     }
 
     void renderVoice (Voice& v, float& outL, float& outR)
     {
         const double sr = currentSampleRate;
-        double pitchMul = 1.0;
-        if (pLfoTarget == 0) pitchMul = std::pow (2.0, lfoOut * pLfoDepth * 2.0 / 12.0);
-        const double f1 = v.freq * std::pow (2.0, pOct1) * pitchMul;
-        const double f2 = v.freq * std::pow (2.0, pOct2 + (pSemi2 + pFine2 * 0.01) / 12.0) * pitchMul;
-        const float shapeMod = pLfoTarget == 3 ? lfoOut * pLfoDepth * 0.5f : 0.0f;
-        const float sh1 = juce::jlimit (0.0f, 1.0f, pShape1 + shapeMod), sh2 = juce::jlimit (0.0f, 1.0f, pShape2 + shapeMod);
+        const double f1 = v.freq * v.mul1;
+        const double f2 = v.freq * v.mul2;
 
         // white noise, softened a little for the noise oscillator
         const float white = rnd.nextFloat() * 2.0f - 1.0f;
@@ -436,13 +638,13 @@ private:
         for (int u = 0; u < pUnison; ++u)
         {
             const float pos = pUnison > 1 ? (float) u / (float) (pUnison - 1) * 2.0f - 1.0f : 0.0f;
-            const double det = std::pow (2.0, pos * pDetune * 0.01 / 12.0);
+            const double det = pUnison > 1 ? std::exp2 (pos * v.det * 0.01 / 12.0) : 1.0;
             auto& a = v.ph1[(size_t) u];
             auto& b = v.ph2[(size_t) u];
             const double d1 = f1 * det / sr, d2 = f2 * det / sr;
             float s = 0;
-            if (pLvl1 > 0) s += pLvl1 * oscSample (pW1, a, d1, sh1, v.noiseLp);
-            if (pLvl2 > 0) s += pLvl2 * oscSample (pW2, b, d2, sh2, white);
+            if (v.lvl1 > 0) s += v.lvl1 * oscSample (pW1, a, d1, v.sh1, v.noiseLp);
+            if (v.lvl2 > 0) s += v.lvl2 * oscSample (pW2, b, d2, v.sh2, white);
             a += d1; if (a >= 1.0) a -= 1.0;
             b += d2; if (b >= 1.0) b -= 1.0;
             const float pan = pos * pWidth;
@@ -450,24 +652,37 @@ private:
             r += s * (1.0f + juce::jmin (0.0f, pan));
         }
         // sub (an octave below osc 1) and noise sit in the middle
-        const float sub = pSub > 0 ? pSub * (float) std::sin (v.phSub * juce::MathConstants<double>::twoPi) * std::sqrt ((float) pUnison) : 0.0f;
+        const float uniScale = std::sqrt ((float) pUnison);
+        const float sub = pSub > 0 ? pSub * (float) std::sin (v.phSub * juce::MathConstants<double>::twoPi) * uniScale : 0.0f;
         v.phSub += f1 * 0.5 / sr; if (v.phSub >= 1.0) v.phSub -= 1.0;
-        const float nz = pNoise * white * 0.5f * std::sqrt ((float) pUnison);
+        const float nz = pNoise * white * 0.5f * uniScale;
         l += sub + nz; r += sub + nz;
 
-        if (pDrive > 0) { const float dr = 1.0f + pDrive * 6.0f; l = std::tanh (l * dr) / std::sqrt (dr); r = std::tanh (r * dr) / std::sqrt (dr); }
+        if (v.drive > 0) { const float dr = 1.0f + v.drive * 6.0f; l = std::tanh (l * dr) / std::sqrt (dr); r = std::tanh (r * dr) / std::sqrt (dr); }
 
-        const int mode = pFType <= 1 ? 0 : pFType == 2 ? 1 : 2;
-        float yl = svf (l, v.s1[0], v.g, v.k, mode), yr = svf (r, v.s1[1], v.g, v.k, mode);
-        if (pFType == 0) { yl = svf (yl, v.s2[0], v.g, v.k * 1.3f, 0); yr = svf (yr, v.s2[1], v.g, v.k * 1.3f, 0); }
+        float yl, yr;
+        const float scale = 1.0f / uniScale;   // the saturating filters see one voice's level, however many unison voices
+        switch (pFType)
+        {
+            case 4:   // Ladder
+                yl = ladder (l, v, 0, scale); yr = ladder (r, v, 1, scale);
+                break;
+            case 5:   // Warm LP: two stages with soft saturation going into each
+                yl = svf (softClip (l * scale) / scale, v.s1[0], v.g, v.k, 0); yr = svf (softClip (r * scale) / scale, v.s1[1], v.g, v.k, 0);
+                yl = svf (softClip (yl * scale) / scale, v.s2[0], v.g, v.k * 1.3f, 0); yr = svf (softClip (yr * scale) / scale, v.s2[1], v.g, v.k * 1.3f, 0);
+                break;
+            default:
+            {
+                const int mode = pFType <= 1 ? 0 : pFType == 2 ? 1 : pFType == 3 ? 2 : 3;
+                yl = svf (l, v.s1[0], v.g, v.k, mode); yr = svf (r, v.s1[1], v.g, v.k, mode);
+                if (pFType == 0) { yl = svf (yl, v.s2[0], v.g, v.k * 1.3f, 0); yr = svf (yr, v.s2[1], v.g, v.k * 1.3f, 0); }
+            }
+        }
 
         v.filt.next();
-        float env = v.amp.next() * (0.3f + 0.7f * v.vel);
-        if (pLfoTarget == 2) env *= 1.0f - pLfoDepth * 0.5f * (1.0f - lfoOut);
-        float panL = 1, panR = 1;
-        if (pLfoTarget == 4) { const float p = lfoOut * pLfoDepth; panL = 1.0f - juce::jmax (0.0f, p); panR = 1.0f + juce::jmin (0.0f, p); }
-        outL += yl * env * panL;
-        outR += yr * env * panR;
+        const float env = v.amp.next() * (0.3f + 0.7f * v.vel) * v.volMod;
+        outL += yl * env * v.panL;
+        outR += yr * env * v.panR;
         if (! v.amp.active()) v.note = -1;
     }
 
@@ -494,7 +709,8 @@ namespace
 {
     const juce::Colour bgCol (0xff0e0f12), panelCol (0xff16181d), screenCol (0xff07080a), lineCol (0xff2a2d35),
                        textCol (0xffeceff4), dimCol (0xff8a8f9c);
-    const juce::Colour oscA (0xffff6b5b), oscB (0xff3fd6c8), filtCol (0xffffb547), envCol (0xffa58bff), lfoCol (0xffb6f24a), ampCol (0xff6fb7ff);
+    const juce::Colour oscA (0xffff6b5b), oscB (0xff3fd6c8), filtCol (0xffffb547), envCol (0xffa58bff), lfoCol (0xffb6f24a), ampCol (0xff6fb7ff),
+                       lfo2Col (0xfff2d24a), modCol (0xffff5fb8);
 
     Skin skinFor (juce::Colour c)
     {
@@ -520,12 +736,38 @@ namespace
     void setNorm (BuiltinFx& fx, const char* id, float v) { auto* p = fx.state.getParameter (id); p->setValueNotifyingHost (juce::jlimit (0.0f, 1.0f, v)); }
 }
 
+// a mod amount: a bar from the middle, left = negative, right = positive, plus a line for what it is doing now
+class ModAmountSlider : public juce::Slider
+{
+public:
+    ModAmountSlider() : juce::Slider (juce::Slider::LinearHorizontal, juce::Slider::NoTextBox) {}
+    float live = 0;   // -1..1
+    juce::Colour colour { 0xffb6f24a };
+    void paint (juce::Graphics& g) override
+    {
+        auto r = getLocalBounds().toFloat().reduced (1, 4);
+        g.setColour (juce::Colour (0xff0b0c0f)); g.fillRoundedRectangle (r, 4.0f);
+        const float v = (float) getValue() / 100.0f, mid = r.getCentreX();
+        auto bar = v >= 0 ? juce::Rectangle<float> (mid, r.getY(), r.getWidth() * 0.5f * v, r.getHeight())
+                          : juce::Rectangle<float> (mid + r.getWidth() * 0.5f * v, r.getY(), -r.getWidth() * 0.5f * v, r.getHeight());
+        g.setColour (colour.withAlpha (isEnabled() ? 0.55f : 0.2f)); g.fillRoundedRectangle (bar, 3.0f);
+        g.setColour (juce::Colours::white.withAlpha (0.25f)); g.drawVerticalLine ((int) mid, r.getY(), r.getBottom());
+        if (std::abs (live) > 0.001f)
+        {
+            const float x = mid + juce::jlimit (-1.0f, 1.0f, live) * r.getWidth() * 0.5f;
+            g.setColour (juce::Colours::white); g.fillRoundedRectangle (x - 1.5f, r.getY() - 2, 3.0f, r.getHeight() + 4, 1.5f);
+        }
+        g.setColour (juce::Colour (0xffeceff4)); g.setFont (theme::font (10.5f, true));
+        g.drawText ((v > 0 ? "+" : "") + juce::String (juce::roundToInt (v * 100)) + "%", r.reduced (6, 0), v >= 0 ? juce::Justification::centredLeft : juce::Justification::centredRight);
+    }
+};
+
 class SynthEditor : public juce::AudioProcessorEditor, private juce::Timer
 {
 public:
     explicit SynthEditor (SynthFx& p) : AudioProcessorEditor (p), fx (p),
         lookA (skinFor (oscA)), lookB (skinFor (oscB)), lookF (skinFor (filtCol)), lookE (skinFor (envCol)),
-        lookL (skinFor (lfoCol)), lookM (skinFor (ampCol)), lookS (skinFor (juce::Colour (0xffd8a96e)))
+        lookL (skinFor (lfoCol)), lookM (skinFor (ampCol)), lookS (skinFor (juce::Colour (0xffd8a96e))), lookL2 (skinFor (lfo2Col)), lookX (skinFor (modCol))
     {
         setLookAndFeel (&lookS);
         // patch picker
@@ -567,9 +809,48 @@ public:
         lfoWave = sw ("lfowave", lookL);
         lfoTarget = sw ("lfotarget", lookL);
         lfoKnobs = { k ("lforate", "RATE", lookL), k ("lfodepth", "DEPTH", lookL) };
-        volume = k ("volume", "VOLUME", lookS);
+        lfo2Wave = sw ("lfo2wave", lookL2);
+        lfo2Target = sw ("lfo2target", lookL2);
+        lfo2Knobs = { k ("lfo2rate", "RATE", lookL2), k ("lfo2depth", "DEPTH", lookL2) };
+        volume.setSliderStyle (juce::Slider::LinearHorizontal);
+        volume.setTextBoxStyle (juce::Slider::TextBoxRight, false, 62, 20);
+        volume.setLookAndFeel (&lookS);
+        volume.setColour (juce::Slider::trackColourId, juce::Colour (0xffd8a96e));
+        volume.setColour (juce::Slider::backgroundColourId, juce::Colour (0xff262932));
+        volume.setColour (juce::Slider::thumbColourId, textCol);
+        addAndMakeVisible (volume);
+        volumeAttach = std::make_unique<APVTS::SliderAttachment> (fx.state, "volume", volume);
 
-        setSize (1120, 760);
+        // LFO 1 / LFO 2 tabs
+        for (int i = 0; i < 2; ++i)
+        {
+            auto& t = lfoTab[i];
+            t.setButtonText (i == 0 ? "LFO 1" : "LFO 2");
+            t.setClickingTogglesState (true);
+            t.setRadioGroupId (4711);
+            t.setLookAndFeel (i == 0 ? &lookL : &lookL2);
+            t.onClick = [this] { showLfo (lfoTab[1].getToggleState() ? 1 : 0); };
+            addAndMakeVisible (t);
+        }
+        lfoTab[0].setToggleState (true, juce::dontSendNotification);
+        showLfo (0);
+
+        // the mod matrix
+        for (int i = 0; i < modSlots; ++i)
+        {
+            auto& sl = slots[(size_t) i];
+            sl.src.addItemList (modSources, 1);
+            sl.dst.addItemList (modDests, 1);
+            for (auto* cb : { &sl.src, &sl.dst }) { cb->setLookAndFeel (&lookX); addAndMakeVisible (*cb); }
+            sl.srcAttach = std::make_unique<APVTS::ComboBoxAttachment> (fx.state, modSrcIds[i], sl.src);
+            sl.dstAttach = std::make_unique<APVTS::ComboBoxAttachment> (fx.state, modDstIds[i], sl.dst);
+            sl.amount.colour = modCol;
+            sl.amount.setDoubleClickReturnValue (true, 0.0);
+            addAndMakeVisible (sl.amount);
+            sl.amtAttach = std::make_unique<APVTS::SliderAttachment> (fx.state, modAmtIds[i], sl.amount);
+        }
+
+        setSize (1240, 770);
         timerCallback();   // show the current sound's name straight away
         startTimerHz (40);
     }
@@ -578,6 +859,9 @@ public:
     {
         for (auto* kn : knobs) kn->setLookAndFeel (nullptr);
         for (auto* s : switches) s->setLookAndFeel (nullptr);
+        for (auto& t : lfoTab) t.setLookAndFeel (nullptr);
+        volume.setLookAndFeel (nullptr);
+        for (auto& sl : slots) { sl.src.setLookAndFeel (nullptr); sl.dst.setLookAndFeel (nullptr); }
         setLookAndFeel (nullptr);
     }
 
@@ -594,8 +878,9 @@ public:
         g.drawText ("RENASYNTH", 22, 10, 260, 36, juce::Justification::centredLeft);
         g.setColour (dimCol);
         g.setFont (theme::font (10.5f, true));
-        g.drawText ("2 OSC  /  SUB  /  NOISE  /  UNISON  /  FILTER  /  2 ENV  /  LFO", 210, 10, 420, 36, juce::Justification::centredLeft);
+        g.drawText ("2 OSC  /  SUB  /  NOISE  /  UNISON  /  7 FILTERS  /  2 ENV  /  2 LFO  /  MOD MATRIX", 210, 10, 560, 36, juce::Justification::centredLeft);
         g.drawText ("SOUND", patchBox.getBounds().translated (-50, 0).withWidth (46), juce::Justification::centredRight);
+        g.drawText ("VOLUME", volume.getBounds().translated (-56, 0).withWidth (52), juce::Justification::centredRight);
 
         for (auto& s : sections)
         {
@@ -614,8 +899,9 @@ public:
         drawFilter (g, filterScreen);
         drawEnv (g, fEnvScreen, "fa", "fd", "fs", "fr", envCol, fx.filterLevel.load(), -1);
         drawEnv (g, aEnvScreen, "aa", "ad", "as", "ar", ampCol, fx.ampLevel.load(), fx.ampStage.load());
-        drawLfo (g, lfoScreen);
+        drawLfo (g, lfoScreen, shownLfo);
         drawScope (g, scopeScreen);
+        drawMatrix (g);
     }
 
     void resized() override
@@ -623,6 +909,8 @@ public:
         sections.clear();
         auto r = getLocalBounds().reduced (14, 10);
         auto head = r.removeFromTop (44);
+        volume.setBounds (head.removeFromRight (200).reduced (0, 10));
+        head.removeFromRight (64);
         playButton.setBounds (head.removeFromRight (40).reduced (2, 6));
         head.removeFromRight (6);
         patchBox.setBounds (head.removeFromRight (230).reduced (0, 8));
@@ -684,22 +972,43 @@ public:
             c.removeFromTop (6);
             knobRow (c, aEnvKnobs);
         }
-        // row 3: LFO, scope, volume
+        // row 3: LFOs, mod matrix, output
         {
-            auto a = section (row3.removeFromLeft (620), "LFO", lfoCol); row3.removeFromLeft (8);
-            auto ctl = a.removeFromRight (300);
+            auto a = section (row3.removeFromLeft (520), "", lfoCol); row3.removeFromLeft (8);
+            auto tabs = sections.back().area.withHeight (26).reduced (10, 3).removeFromLeft (150);
+            lfoTab[0].setBounds (tabs.removeFromLeft (72)); tabs.removeFromLeft (6);
+            lfoTab[1].setBounds (tabs.removeFromLeft (72));
+            auto ctl = a.removeFromRight (270);
             lfoScreen = a.reduced (0, 2).toFloat();
             ctl.removeFromLeft (10);
-            lfoWave->setBounds (ctl.removeFromTop (24));
-            ctl.removeFromTop (6);
-            lfoTarget->setBounds (ctl.removeFromTop (24));
-            ctl.removeFromTop (4);
-            knobRow (ctl, lfoKnobs);
+            for (int i = 0; i < 2; ++i)
+            {
+                auto c2 = ctl;
+                (i == 0 ? lfoWave : lfo2Wave)->setBounds (c2.removeFromTop (24));
+                c2.removeFromTop (6);
+                (i == 0 ? lfoTarget : lfo2Target)->setBounds (c2.removeFromTop (24));
+                c2.removeFromTop (4);
+                knobRow (c2, i == 0 ? lfoKnobs : lfo2Knobs);
+            }
 
-            auto b = section (row3.removeFromLeft (row3.getWidth() - 130), "OUTPUT", juce::Colour (0xffd8a96e)); row3.removeFromLeft (8);
+            auto m = section (row3.removeFromLeft (440), "MOD MATRIX", modCol); row3.removeFromLeft (8);
+            matrixArea = m;
+            m.removeFromTop (16);   // column titles
+            const int rowH2 = m.getHeight() / modSlots;
+            for (int i = 0; i < modSlots; ++i)
+            {
+                auto rr = m.removeFromTop (rowH2).reduced (0, 3);
+                auto& sl = slots[(size_t) i];
+                rr.removeFromLeft (18);   // slot number
+                sl.src.setBounds (rr.removeFromLeft (112));
+                rr.removeFromLeft (22);   // arrow
+                sl.dst.setBounds (rr.removeFromLeft (118));
+                rr.removeFromLeft (8);
+                sl.amount.setBounds (rr);
+            }
+
+            auto b = section (row3, "OUTPUT", juce::Colour (0xffd8a96e));
             scopeScreen = b.reduced (0, 2).toFloat();
-            auto c = section (row3, "MASTER", juce::Colour (0xffd8a96e));
-            volume->setBounds (c.withSizeKeepingCentre (80, 96));
         }
     }
 
@@ -731,7 +1040,7 @@ public:
 
 private:
     SynthFx& fx;
-    SkinLook lookA, lookB, lookF, lookE, lookL, lookM, lookS;
+    SkinLook lookA, lookB, lookF, lookE, lookL, lookM, lookS, lookL2, lookX;
     juce::ComboBox patchBox;
     juce::TextButton playButton { juce::String::fromUTF8 ("\xe2\x96\xb6") };
     juce::OwnedArray<Knob> knobs;
@@ -739,7 +1048,29 @@ private:
     struct Osc { Switch* wave = nullptr; std::vector<Knob*> knobs; } o1, o2;
     std::vector<Knob*> voiceKnobs, filterKnobs, fEnvKnobs, aEnvKnobs, lfoKnobs;
     Switch* filterType = nullptr; Switch* lfoWave = nullptr; Switch* lfoTarget = nullptr;
-    Knob* volume = nullptr;
+    Switch* lfo2Wave = nullptr; Switch* lfo2Target = nullptr;
+    std::vector<Knob*> lfo2Knobs;
+    juce::TextButton lfoTab[2];
+    int shownLfo = 0;
+    struct Slot
+    {
+        juce::ComboBox src, dst;
+        ModAmountSlider amount;
+        std::unique_ptr<APVTS::ComboBoxAttachment> srcAttach, dstAttach;
+        std::unique_ptr<APVTS::SliderAttachment> amtAttach;
+    };
+    std::array<Slot, 4> slots;
+    juce::Rectangle<int> matrixArea;
+
+    void showLfo (int which)
+    {
+        shownLfo = which;
+        for (auto* c : std::initializer_list<juce::Component*> { lfoWave, lfoTarget, lfoKnobs[0], lfoKnobs[1] }) c->setVisible (which == 0);
+        for (auto* c : std::initializer_list<juce::Component*> { lfo2Wave, lfo2Target, lfo2Knobs[0], lfo2Knobs[1] }) c->setVisible (which == 1);
+        repaint();
+    }
+    juce::Slider volume;
+    std::unique_ptr<APVTS::SliderAttachment> volumeAttach;
     struct Section { juce::Rectangle<int> area; juce::String title; juce::Colour colour; };
     std::vector<Section> sections;
     juce::Rectangle<float> oscScreen1, oscScreen2, voiceScreen, filterScreen, fEnvScreen, aEnvScreen, lfoScreen, scopeScreen;
@@ -759,6 +1090,13 @@ private:
         const int idx = patchIndex();
         if (patchBox.getSelectedId() != idx + 1) patchBox.setSelectedId (idx + 1, juce::dontSendNotification);
         if (idx < 0) patchBox.setText (fx.patchName(), juce::dontSendNotification);
+        for (int i = 0; i < modSlots; ++i)
+        {
+            auto& sl = slots[(size_t) i];
+            sl.amount.live = fx.slotNow[(size_t) i].load();
+            const bool on = sl.src.getSelectedId() > 1 && sl.dst.getSelectedId() > 1;
+            sl.amount.setAlpha (on ? 1.0f : 0.5f);
+        }
         repaint();
     }
     int patchIndex() const
@@ -834,12 +1172,18 @@ private:
 
     float filterMag (double f, double fc, float reso, int type) const
     {
-        // magnitude of the 2-pole state-variable filter (and squared for the 24 dB low-pass)
         const double w = f / fc;
+        if (type == 4)   // ladder: four one-pole stages in a feedback loop
+        {
+            const double k = 3.9 * reso;
+            const std::complex<double> s1 (1.0, w);
+            return (float) ((1.0 + k * 0.45) / std::abs (s1 * s1 * s1 * s1 + k));
+        }
+        // the 2-pole state-variable filter (twice over for the 24 dB types)
         const double k = 2.0 - 1.96 * reso;
         const double den = std::sqrt ((1 - w * w) * (1 - w * w) + (k * w) * (k * w));
-        double m = type <= 1 ? 1.0 / den : type == 2 ? (w * w) / den : (k * w) / den;
-        if (type == 0) m = m * (1.0 / std::sqrt ((1 - w * w) * (1 - w * w) + (k * 1.3 * w) * (k * 1.3 * w)));
+        double m = (type <= 1 || type == 5) ? 1.0 / den : type == 2 ? (w * w) / den : type == 3 ? (k * w) / den : std::abs (1 - w * w) / den;
+        if (type == 0 || type == 5) m = m * (1.0 / std::sqrt ((1 - w * w) * (1 - w * w) + (k * 1.3 * w) * (k * 1.3 * w)));
         return (float) m;
     }
 
@@ -953,23 +1297,22 @@ private:
         }
     }
 
-    void drawLfo (juce::Graphics& g, juce::Rectangle<float> r)
+    void drawLfo (juce::Graphics& g, juce::Rectangle<float> r, int which)
     {
         screen (g, r);
         auto plot = r.reduced (12, 14);
-        const int wave = (int) fx.param ("lfowave");
-        const float depth = fx.param ("lfodepth") * 0.01f;
+        const juce::String pre (which == 0 ? "lfo" : "lfo2");
+        const auto col = which == 0 ? lfoCol : lfo2Col;
+        const int wave = (int) fx.param ((pre + "wave").toRawUTF8());
+        // depth: its own quick route, or full if the matrix uses it
+        bool usedByMatrix = false;
+        for (int i = 0; i < modSlots; ++i) usedByMatrix = usedByMatrix || ((int) fx.param (modSrcIds[i]) == (which == 0 ? SrcLfo1 : SrcLfo2) && fx.param (modAmtIds[i]) != 0.0f);
+        const float depth = juce::jmax (fx.param ((pre + "depth").toRawUTF8()) * 0.01f, usedByMatrix ? 0.7f : 0.0f);
         const float amp = plot.getHeight() * 0.45f * (0.08f + 0.92f * depth);
         auto val = [&] (double ph)
         {
-            switch (wave)
-            {
-                case 0: return (float) std::sin (ph * juce::MathConstants<double>::twoPi);
-                case 1: return (float) (ph < 0.5 ? 4.0 * ph - 1.0 : 3.0 - 4.0 * ph);
-                case 2: return (float) (1.0 - 2.0 * ph);
-                case 3: return ph < 0.5 ? 1.0f : -1.0f;
-                default: { juce::Random rr ((int) (ph * 8.0) * 97 + 3); return rr.nextFloat() * 2.0f - 1.0f; }
-            }
+            if (wave == 4) { juce::Random rr ((int) (ph * 8.0) * 97 + 3); return rr.nextFloat() * 2.0f - 1.0f; }
+            return lfoShape (wave, ph, 0.0f);
         };
         juce::Path p;
         const double cycles = 2.0;
@@ -979,15 +1322,48 @@ private:
             const float y = plot.getCentreY() - val (ph) * amp;
             if (x == 0) p.startNewSubPath (plot.getX(), y); else p.lineTo (plot.getX() + x, y);
         }
-        glowPath (g, p, lfoCol.withMultipliedAlpha (depth > 0 ? 1.0f : 0.35f));
+        glowPath (g, p, col.withMultipliedAlpha (depth > 0 ? 1.0f : 0.35f));
         // a dot riding the wave at the LFO's position
-        const float ph = fx.lfoPhase.load();
+        const float ph = which == 0 ? fx.lfoPhase.load() : fx.lfo2Phase.load();
         const float dx = plot.getX() + ph / (float) cycles * plot.getWidth();
         const float dy = plot.getCentreY() - val (ph) * amp;
         g.setColour (juce::Colours::white); g.fillEllipse (dx - 5, dy - 5, 10, 10);
-        g.setColour (lfoCol.withAlpha (0.3f)); g.fillEllipse (dx - 11, dy - 11, 22, 22);
+        g.setColour (col.withAlpha (0.3f)); g.fillEllipse (dx - 11, dy - 11, 22, 22);
         g.setColour (dimCol); g.setFont (theme::font (10.0f, true));
-        g.drawText (juce::String (fx.param ("lforate"), 2) + " Hz  >  " + lfoTargets[(int) fx.param ("lfotarget")].toUpperCase(), r.reduced (10, 6), juce::Justification::topRight);
+        juce::String where = fx.param ((pre + "depth").toRawUTF8()) > 0 ? lfoTargets[(int) fx.param ((pre + "target").toRawUTF8())].toUpperCase() : juce::String();
+        if (usedByMatrix) where += (where.isEmpty() ? "" : " + ") + juce::String ("MATRIX");
+        if (where.isEmpty()) where = "OFF";
+        g.drawText (juce::String (fx.param ((pre + "rate").toRawUTF8()), 2) + " Hz  >  " + where, r.reduced (10, 6), juce::Justification::topRight);
+    }
+
+    void drawMatrix (juce::Graphics& g)
+    {
+        auto m = matrixArea;
+        auto head = m.removeFromTop (16);
+        g.setColour (dimCol); g.setFont (theme::font (9.5f, true));
+        head.removeFromLeft (18);
+        g.drawText ("SOURCE", head.removeFromLeft (112), juce::Justification::centredLeft);
+        head.removeFromLeft (22);
+        g.drawText ("DESTINATION", head.removeFromLeft (118), juce::Justification::centredLeft);
+        head.removeFromLeft (8);
+        g.drawText ("AMOUNT  (LIVE)", head, juce::Justification::centredLeft);
+        const int rowH2 = m.getHeight() / modSlots;
+        for (int i = 0; i < modSlots; ++i)
+        {
+            auto rr = m.removeFromTop (rowH2);
+            const bool on = slots[(size_t) i].src.getSelectedId() > 1 && slots[(size_t) i].dst.getSelectedId() > 1 && fx.param (modAmtIds[i]) != 0.0f;
+            const float live = std::abs (fx.slotNow[(size_t) i].load());
+            g.setColour (on ? modCol.withAlpha (0.5f + 0.5f * juce::jmin (1.0f, live * 3.0f)) : lineCol);
+            g.fillEllipse ((float) rr.getX() + 2, (float) rr.getCentreY() - 5, 10, 10);
+            g.setColour (on ? textCol : dimCol); g.setFont (theme::font (10.0f, true));
+            // the arrow between source and destination
+            const float ax = (float) rr.getX() + 18 + 112 + 4, ay = (float) rr.getCentreY();
+            juce::Path arrow;
+            arrow.startNewSubPath (ax, ay); arrow.lineTo (ax + 13, ay);
+            arrow.addTriangle (ax + 15, ay, ax + 9, ay - 4, ax + 9, ay + 4);
+            g.setColour (on ? modCol : lineCol);
+            g.strokePath (arrow, juce::PathStrokeType (1.5f)); g.fillPath (arrow);
+        }
     }
 
     void drawScope (juce::Graphics& g, juce::Rectangle<float> r)
