@@ -31,7 +31,8 @@ juce::String Updater::assetName()
 
 juce::URL Updater::assetUrl (const juce::String& name)
 {
-    return juce::URL ("https://github.com/" + juce::String (repository) + "/releases/latest/download/" + name);
+    // the newest installers are kept as plain files on the releases repo's main branch
+    return juce::URL ("https://raw.githubusercontent.com/" + juce::String (repository) + "/main/" + name);
 }
 
 void Updater::check()
