@@ -59,7 +59,7 @@ struct AppContext
 class IconButton : public juce::Button
 {
 public:
-    enum class Icon { Play, Pause, Stop, Record, ToStart, Loop, Metronome, Plus };
+    enum class Icon { Play, Pause, Stop, Record, ToStart, Loop, Metronome, Plus, Piano };
 
     IconButton (const juce::String& name, Icon i) : juce::Button (name), icon (i) {}
 
@@ -104,6 +104,15 @@ public:
                 g.strokePath (a, juce::PathStrokeType (2.0f));
                 p.addTriangle (ir.getCentreX() - 1, ir.getY() - 4, ir.getCentreX() - 1, ir.getY() + 2, ir.getCentreX() + 4, ir.getY() - 1);
                 break;
+            }
+            case Icon::Piano:
+            {
+                auto k = r.withSizeKeepingCentre (r.getHeight() * 0.62f, r.getHeight() * 0.46f);
+                g.drawRoundedRectangle (k, 2.0f, 1.6f);
+                const float w = k.getWidth() / 5.0f;   // C D E F G
+                for (int i = 1; i < 5; ++i) g.drawVerticalLine ((int) (k.getX() + w * i), k.getCentreY(), k.getBottom());
+                for (int i : { 1, 2, 4 }) g.fillRect (k.getX() + w * i - w * 0.3f, k.getY(), w * 0.6f, k.getHeight() * 0.58f);
+                return;
             }
             case Icon::Metronome:
                 p.addTriangle (ir.getCentreX(), ir.getY() - 1, ir.getX(), ir.getBottom(), ir.getRight(), ir.getBottom());

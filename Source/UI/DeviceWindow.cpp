@@ -186,6 +186,171 @@ private:
 // =============================================================================
 //  One device's editor in a floating window
 // =============================================================================
+// =============================================================================
+//  Preset bar: on top of every RENASOUND device. Presets are small files in
+//  Music/RENASOUND/Presets/<device>/, holding the device's full settings.
+// =============================================================================
+class PresetBar : public juce::Component
+{
+public:
+    PresetBar (AppContext& c, juce::AudioProcessor& p, const juce::String& deviceName) : ctx (c), proc (p), name (deviceName)
+    {
+        for (auto* b : { &prev, &next, &save, &remove })
+        {
+            addAndMakeVisible (*b);
+            b->getProperties().set ("compact", true);
+        }
+        addAndMakeVisible (box);
+        box.setTextWhenNothingSelected ("Default");
+        box.onChange = [this] { boxChanged(); };
+        prev.onClick = [this] { step (-1); };
+        next.onClick = [this] { step (1); };
+        save.onClick = [this] { askToSave(); };
+        remove.onClick = [this] { deleteCurrent(); };
+        prev.setTooltip ("Previous preset");
+        next.setTooltip ("Next preset");
+        save.setTooltip ("Save these settings as a preset");
+        remove.setTooltip ("Delete this preset");
+        refresh();
+        setSize (400, 38);
+    }
+
+    juce::File folder() const
+    {
+        return juce::File::getSpecialLocation (juce::File::userMusicDirectory).getChildFile ("RENASOUND").getChildFile ("Presets")
+                   .getChildFile (juce::File::createLegalFileName (name));
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        g.fillAll (theme::bg);
+        g.setColour (theme::textDim);
+        g.setFont (theme::font (10.5f, true));
+        g.drawText ("PRESET", 12, 0, 60, getHeight(), juce::Justification::centredLeft);
+        g.setColour (theme::grid);
+        g.drawHorizontalLine (getHeight() - 1, 0, (float) getWidth());
+    }
+
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced (8, 5).withTrimmedLeft (54);
+        remove.setBounds (r.removeFromRight (64)); r.removeFromRight (2);
+        save.setBounds (r.removeFromRight (64));   r.removeFromRight (8);
+        next.setBounds (r.removeFromRight (28));
+        prev.setBounds (r.removeFromRight (28));   r.removeFromRight (4);
+        box.setBounds (r.removeFromLeft (juce::jmin (r.getWidth(), 260)));
+    }
+
+private:
+    AppContext& ctx;
+    juce::AudioProcessor& proc;
+    juce::String name;
+    juce::ComboBox box;
+    juce::TextButton prev { juce::String::fromUTF8 ("\xe2\x97\x80") }, next { juce::String::fromUTF8 ("\xe2\x96\xb6") },
+                     save { "Save..." }, remove { "Delete" };
+    juce::Array<juce::File> files;
+    juce::String current;
+    std::unique_ptr<juce::AlertWindow> prompt;
+
+    void refresh()
+    {
+        files.clear();
+        for (const auto& e : juce::RangedDirectoryIterator (folder(), false, "*.rspreset", juce::File::findFiles)) files.add (e.getFile());
+        struct ByName { static int compareElements (const juce::File& a, const juce::File& b) { return a.getFileName().compareNatural (b.getFileName()); } } cmp;
+        files.sort (cmp);
+        box.clear (juce::dontSendNotification);
+        box.addItem ("Default", 1);
+        if (! files.isEmpty()) box.addSeparator();
+        for (int i = 0; i < files.size(); ++i) box.addItem (files[i].getFileNameWithoutExtension(), 100 + i);
+        box.addSeparator();
+        box.addItem ("Show presets folder", 2);
+        int sel = 0;
+        for (int i = 0; i < files.size(); ++i) if (files[i].getFileNameWithoutExtension() == current) sel = 100 + i;
+        if (sel > 0) box.setSelectedId (sel, juce::dontSendNotification); else box.setText (current.isEmpty() ? juce::String ("Default") : current, juce::dontSendNotification);
+        remove.setEnabled (sel > 0);
+    }
+
+    void boxChanged()
+    {
+        const int id = box.getSelectedId();
+        if (id == 1) { loadDefault(); return; }
+        if (id == 2) { folder().createDirectory(); folder().revealToUser(); refresh(); return; }
+        if (id >= 100 && id - 100 < files.size()) load (files[id - 100]);
+    }
+
+    void step (int dir)
+    {
+        if (files.isEmpty()) return;
+        int idx = -1;
+        for (int i = 0; i < files.size(); ++i) if (files[i].getFileNameWithoutExtension() == current) idx = i;
+        idx = (idx + dir + files.size()) % files.size();
+        if (idx < 0) idx = 0;
+        load (files[idx]);
+    }
+
+    void load (const juce::File& f)
+    {
+        auto xml = juce::XmlDocument::parse (f);
+        if (xml == nullptr || ! xml->hasTagName ("RENASOUND_PRESET")) return;
+        juce::MemoryBlock mb;
+        if (! mb.fromBase64Encoding (xml->getStringAttribute ("state"))) return;
+        ctx.project.beginEdit();
+        proc.setStateInformation (mb.getData(), (int) mb.getSize());
+        ctx.project.dirty = true;
+        current = f.getFileNameWithoutExtension();
+        refresh();
+    }
+
+    void loadDefault()
+    {
+        ctx.project.beginEdit();
+        for (auto* prm : proc.getParameters()) prm->setValueNotifyingHost (prm->getDefaultValue());
+        ctx.project.dirty = true;
+        current.clear();
+        refresh();
+    }
+
+    void askToSave()
+    {
+        prompt = std::make_unique<juce::AlertWindow> ("Save preset", "A name for these " + name + " settings:", juce::MessageBoxIconType::NoIcon);
+        prompt->addTextEditor ("name", current.isNotEmpty() ? current : juce::String ("My " + name), juce::String());
+        prompt->addButton ("Save", 1, juce::KeyPress (juce::KeyPress::returnKey));
+        prompt->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+        if (auto* te = prompt->getTextEditor ("name"))
+        {
+            te->setSelectAllWhenFocused (true);
+            juce::MessageManager::callAsync ([sp = juce::Component::SafePointer<juce::TextEditor> (te)] { if (sp != nullptr) sp->grabKeyboardFocus(); });
+        }
+        prompt->enterModalState (true, juce::ModalCallbackFunction::create ([this] (int result)
+        {
+            if (result != 1 || prompt == nullptr) return;
+            const auto presetName = juce::File::createLegalFileName (prompt->getTextEditorContents ("name").trim());
+            if (presetName.isEmpty()) return;
+            juce::MemoryBlock mb;
+            proc.getStateInformation (mb);
+            juce::XmlElement xml ("RENASOUND_PRESET");
+            xml.setAttribute ("device", name);
+            xml.setAttribute ("state", mb.toBase64Encoding());
+            folder().createDirectory();
+            xml.writeTo (folder().getChildFile (presetName + ".rspreset"));
+            current = presetName;
+            refresh();
+        }), false);
+    }
+
+    void deleteCurrent()
+    {
+        for (auto& f : files)
+            if (f.getFileNameWithoutExtension() == current)
+            {
+                f.moveToTrash();
+                current.clear();
+                refresh();
+                return;
+            }
+    }
+};
+
 class DeviceWindow::Content : public juce::Component
 {
 public:
@@ -205,17 +370,35 @@ public:
                                                                          : juce::String ("Nothing to show."));
         if (editor->getWidth() == 0) editor->setSize (420, 200);
         addAndMakeVisible (*editor);
-        setSize (editor->getWidth(), editor->getHeight());
+        // every device gets the preset bar: RENASOUND's own and third-party plugins
+        if (slot != nullptr && slot->processor != nullptr)
+        {
+            presets = std::make_unique<PresetBar> (ctx, *slot->processor, slot->processor->getName().upToFirstOccurrenceOf (":", false, false).trim());
+            addAndMakeVisible (*presets);
+        }
+        layout();
     }
 
-    ~Content() override { editor.reset(); }   // editor goes before its processor
+    int barHeight() const { return presets != nullptr ? 38 : 0; }
+    void layout()
+    {
+        setSize (juce::jmax (editor->getWidth(), 420), editor->getHeight() + barHeight());
+    }
+    void resized() override
+    {
+        if (presets != nullptr) presets->setBounds (0, 0, getWidth(), barHeight());
+        editor->setTopLeftPosition (0, barHeight());
+    }
+
+    ~Content() override { presets.reset(); editor.reset(); }   // editor goes before its processor
 
     void childBoundsChanged (juce::Component* c) override
     {
-        if (c == editor.get()) setSize (editor->getWidth(), editor->getHeight());
+        if (c == editor.get()) layout();
     }
 
     std::unique_ptr<juce::Component> editor;
+    std::unique_ptr<PresetBar> presets;
 };
 
 DeviceWindow::DeviceWindow (AppContext& c, int track, FxPtr s, bool instrument)

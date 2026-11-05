@@ -10,8 +10,16 @@ MainComponent::MainComponent()
     juce::LookAndFeel::setDefaultLookAndFeel (&lookAndFeel);
 
     // ---- transport ----
-    for (auto* b : { &toStart, &playButton, &stopButton, &recordButton, &loopButton, &clickButton })
+    for (auto* b : { &toStart, &playButton, &stopButton, &recordButton, &loopButton, &clickButton, &typingButton })
         addAndMakeVisible (b);
+    typingButton.onClick = [this] { typing.setEnabled (! typing.isEnabled()); };
+    typingButton.setTooltip ("Musical typing: play the instrument with your computer keyboard.\n"
+                             "A S D F G H J K L = white keys, W E T Y U O P = black keys, Z / X = octave, C / V = velocity");
+    typing.onChange = [this]
+    {
+        typingButton.setToggleState (typing.isEnabled(), juce::dontSendNotification);
+        keyboard.repaint();
+    };
 
     toStart.onClick      = [this] { engine.setPositionBeats (0); };
     playButton.onClick   = [this] { engine.togglePlay(); };
@@ -175,6 +183,7 @@ MainComponent::MainComponent()
     // ---- commands & shortcuts ----
     commandManager.registerAllCommandsForTarget (this);
     addKeyListener (commandManager.getKeyMappings());
+    addKeyListener (&typing);   // added last, so it hears keys before the shortcuts
     setWantsKeyboardFocus (true);
 
     // start with something to play with, like a fresh Mixcraft project
@@ -189,6 +198,7 @@ MainComponent::MainComponent()
 
 MainComponent::~MainComponent()
 {
+    removeKeyListener (&typing);
     deviceWindows.clear();
     pluginManager.reset();
     project.removeChangeListener (this);
@@ -327,6 +337,8 @@ void MainComponent::resized()
     clickButton.setBounds (bar.removeFromLeft (40)); bar.removeFromLeft (12);
     bpmLabel.setBounds (bar.removeFromLeft (34));    bar.removeFromLeft (4);
     bpm.setBounds (bar.removeFromLeft (110));
+    bar.removeFromLeft (8);
+    typingButton.setBounds (bar.removeFromLeft (40));
 
     updateButton.setBounds (bar.removeFromRight (128));   bar.removeFromRight (4);
     settingsButton.setBounds (bar.removeFromRight (104)); bar.removeFromRight (6);
@@ -373,6 +385,8 @@ void MainComponent::timerCallback()
     juce::String plays = "Keyboard: no instrument";
     if (auto t = project.findTrack (engine.liveInputTrackId); t != nullptr)
         plays = "Keyboard plays\n" + t->name;
+    if (typing.isEnabled())
+        plays << "\nTyping: " << juce::MidiMessage::getMidiNoteName (typing.baseNote, true, true, 4) << ", vel " << typing.velocity;
     keyboardLabel.setText (plays, juce::dontSendNotification);
 
     updateTitle();
@@ -387,6 +401,7 @@ void MainComponent::changeListenerCallback (juce::ChangeBroadcaster*)
         for (auto& t : project.tracks)
             if (t->type == Track::Type::Instrument) { engine.liveInputTrackId = t->id; break; }
     }
+    engine.resolveMidiInputs();
     commandManager.commandStatusChanged();
 }
 

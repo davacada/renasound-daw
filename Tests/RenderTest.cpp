@@ -99,6 +99,121 @@ int main (int argc, char** argv)
         { rs::DrumMachine d; auto b = hit (d, [&] (rs::DrumMachine& x) { set (x, "c20", 100); juce::MemoryBlock mb; x.getStateInformation (mb); x.setStateInformation (mb.getData(), (int) mb.getSize()); }); report ("click 100 (resynth)", b); }
         return 0;
     }
+    if (argc >= 2 && juce::String (argv[1]) == "--inputs")
+    {
+        // two armed audio tracks on different inputs record at once, each from its own input
+        struct FakeDevice : juce::AudioIODevice
+        {
+            FakeDevice() : juce::AudioIODevice ("fake", "fake") {}
+            juce::StringArray getOutputChannelNames() override { return { "Out 1", "Out 2" }; }
+            juce::StringArray getInputChannelNames() override  { return { "In 1", "In 2", "In 3", "In 4" }; }
+            juce::Array<double> getAvailableSampleRates() override { return { 48000.0 }; }
+            juce::Array<int> getAvailableBufferSizes() override { return { 512 }; }
+            int getDefaultBufferSize() override { return 512; }
+            juce::String open (const juce::BigInteger&, const juce::BigInteger&, double, int) override { return {}; }
+            void close() override {}
+            bool isOpen() override { return true; }
+            void start (juce::AudioIODeviceCallback*) override {}
+            void stop() override {}
+            bool isPlaying() override { return true; }
+            juce::String getLastError() override { return {}; }
+            int getCurrentBufferSizeSamples() override { return 512; }
+            double getCurrentSampleRate() override { return 48000.0; }
+            int getCurrentBitDepth() override { return 24; }
+            juce::BigInteger getActiveOutputChannels() const override { juce::BigInteger b; b.setRange (0, 2, true); return b; }
+            juce::BigInteger getActiveInputChannels() const override  { juce::BigInteger b; b.setRange (0, 4, true); return b; }
+            int getOutputLatencyInSamples() override { return 0; }
+            int getInputLatencyInSamples() override { return 0; }
+        } dev;
+
+        rs::AudioCache cache;
+        rs::Project project (cache);
+        rs::AudioEngine engine (project);
+        engine.deviceManager.removeAudioCallback (&engine);
+        engine.deviceManager.closeAudioDevice();
+        engine.audioDeviceAboutToStart (&dev);
+        auto a = project.addTrack (rs::Track::Type::Audio);
+        auto b = project.addTrack (rs::Track::Type::Audio);
+        auto c = project.addTrack (rs::Track::Type::Audio);
+        a->audioInput = 2; a->audioInputStereo = true;  a->armed = true;   // In 3+4
+        b->audioInput = 1; b->audioInputStereo = false; b->armed = true;   // In 2
+        c->audioInput = -1; c->armed = true;                                // no input: records nothing
+        engine.startRecording();
+        std::vector<float> chans[4];
+        const float* in[4];
+        for (int ch = 0; ch < 4; ++ch) { chans[ch].assign (512, 0.1f * (ch + 1)); in[ch] = chans[ch].data(); }
+        juce::AudioBuffer<float> out (2, 512);
+        for (int i = 0; i < 200; ++i)
+            engine.audioDeviceIOCallbackWithContext (in, 4, out.getArrayOfWritePointers(), 2, 512, {});
+        engine.stop();
+        juce::Thread::sleep (300);
+        for (auto& t : { a, b, c })
+        {
+            std::cout << "track " << t->id << " (" << rs::AudioEngine::describeInput (*t) << "): " << t->clips.size() << " clip(s)";
+            if (! t->clips.empty() && t->clips[0]->audio != nullptr)
+            {
+                auto& buf = t->clips[0]->audio->buffer;
+                const int mid = buf.getNumSamples() / 2;
+                std::cout << ", L " << buf.getSample (0, mid) << " R " << buf.getSample (1, mid) << ", " << buf.getNumSamples() << " samples";
+                t->clips[0]->audio->file.deleteFile();
+            }
+            std::cout << "\n";
+        }
+        return 0;
+    }
+
+    if (argc >= 3 && juce::String (argv[1]) == "--faces")
+    {
+        // renders every effect faceplate while music-like audio runs through it
+        const double sr = 48000.0;
+        const juce::File outDir (argv[2]);
+        outDir.createDirectory();
+        for (auto id : { "eq", "tubeeq", "compressor", "reverb", "delay", "noisegate", "gater", "phaser", "chorus" })
+        {
+            auto fx = rs::createBuiltinFx (id);
+            auto set = [&] (const char* p, float v) { if (auto* q = fx->state.getParameter (p)) q->setValueNotifyingHost (q->convertTo0to1 (v)); };
+            if (juce::String (id) == "eq") { set ("lowGain", 4); set ("midGain", -5); set ("midFreq", 900); set ("highGain", 3); set ("lowCut", 40); }
+            if (juce::String (id) == "tubeeq") { set ("lowBoost", 6); set ("lowAtten", 3); set ("highBoost", 5); set ("drive", 6); }
+            if (juce::String (id) == "compressor") { set ("threshold", -24); set ("ratio", 4); set ("makeup", 4); }
+            if (juce::String (id) == "reverb") { set ("size", 70); set ("damping", 35); set ("predelay", 20); }
+            if (juce::String (id) == "delay") { set ("sync", 0); set ("time", 320); set ("feedback", 55); set ("pingpong", 1); }
+            if (juce::String (id) == "noisegate") { set ("threshold", -38); }
+            if (juce::String (id) == "gater") { set ("pattern", 2); set ("length", 70); }
+            fx->setPlayConfigDetails (2, 2, sr, 512);
+            fx->prepareToPlay (sr, 512);
+            std::unique_ptr<juce::AudioProcessorEditor> ed (fx->createEditor());
+            juce::Random rnd (3);
+            long long n = 0;
+            for (int frame = 0; frame < 40; ++frame)
+            {
+                for (int b = 0; b < 3; ++b)   // ~32 ms of audio per frame
+                {
+                    juce::AudioBuffer<float> buf (2, 512);
+                    for (int i = 0; i < 512; ++i, ++n)
+                    {
+                        const double t = std::fmod ((double) n / sr, 0.5);
+                        const float env = t < 0.3 ? (float) std::exp (-t / 0.12) : 0.0f;
+                        const float v = env * (0.5f * (float) std::sin (n * 0.02) + 0.15f * (rnd.nextFloat() * 2 - 1)) + 0.002f * (rnd.nextFloat() * 2 - 1);
+                        buf.setSample (0, i, v); buf.setSample (1, i, v);
+                    }
+                    juce::MidiBuffer mb;
+                    fx->processBlock (buf, mb);
+                }
+                auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);
+                if (frame == 39 || frame == 31)
+                {
+                    juce::FileOutputStream os (outDir.getChildFile (juce::String (id) + (frame == 31 ? "_a" : "") + ".png"));
+                    os.setPosition (0); os.truncate();
+                    juce::PNGImageFormat().writeImageToStream (img, os);
+                }
+                juce::Thread::sleep (30);
+            }
+            std::cout << id << " " << ed->getWidth() << "x" << ed->getHeight() << "\n";
+            ed.reset();
+        }
+        return 0;
+    }
+
     if (argc >= 2 && juce::String (argv[1]) == "--devices")
     {
         const double sr = 48000.0;

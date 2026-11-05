@@ -83,6 +83,7 @@ public:
     void processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&) override
     {
         juce::ScopedNoDenormals nd;
+        measureIn (buffer);
         updateCoefficients();
         for (int ch = 0; ch < juce::jmin (2, buffer.getNumChannels()); ++ch)
         {
@@ -202,12 +203,14 @@ public:
         if (dry.getNumSamples() < n) dry.setSize (2, n, false, false, true);
         for (int ch = 0; ch < 2; ++ch) dry.copyFrom (ch, 0, buffer, ch, 0, n);
 
+        measureIn (buffer);
         const float inLevel = buffer.getRMSLevel (0, 0, n);
         juce::dsp::AudioBlock<float> block (buffer.getArrayOfWritePointers(), 2, (size_t) n);
         comp.process (juce::dsp::ProcessContextReplacing<float> (block));
         const float outLevel = buffer.getRMSLevel (0, 0, n);
         const float gr = (inLevel > 1.0e-4f && outLevel > 0) ? juce::Decibels::gainToDecibels (outLevel / inLevel) : 0.0f;
         meterValue = juce::jmin (0.0f, 0.7f * meterValue.load() + 0.3f * gr);
+        if (historyTick (n)) pushHistory (meterValue.load());
 
         buffer.applyGain (juce::Decibels::decibelsToGain (param ("makeup")));
         if (mix < 0.999f)
@@ -216,6 +219,7 @@ public:
                 buffer.applyGain (ch, 0, n, mix);
                 buffer.addFrom (ch, 0, dry, ch, 0, n, 1.0f - mix);
             }
+        measureOut (buffer);
     }
 
 private:
@@ -261,6 +265,8 @@ public:
     {
         juce::ScopedNoDenormals nd;
         const int n = buffer.getNumSamples();
+        measureIn (buffer);
+        if (historyTick (n)) pushHistory (inputDb.load());
         juce::dsp::Reverb::Parameters p;
         p.roomSize = param ("size") / 100.0f;
         p.damping = param ("damping") / 100.0f;
@@ -300,6 +306,7 @@ public:
             buffer.applyGain (ch, 0, n, std::cos (mix * juce::MathConstants<float>::halfPi));
             buffer.addFrom (ch, 0, wet, ch, 0, n, std::sin (mix * juce::MathConstants<float>::halfPi));
         }
+        outputDb = juce::Decibels::gainToDecibels (wet.getMagnitude (0, n), -100.0f);   // the reverb tail itself
     }
 
 private:
@@ -351,6 +358,9 @@ public:
         const double seconds = sync == 0 ? param ("time") * 0.001 : beats[sync] * 60.0 / getBpm();
         smoothedDelay.setTargetValue ((float) juce::jlimit (1.0, (double) line.getNumSamples() - 2, seconds * currentSampleRate));
 
+        measureIn (buffer);
+        if (historyTick (buffer.getNumSamples())) pushHistory (inputDb.load());
+        phase = (float) seconds;   // the actual delay time, for the faceplate
         const float fb = param ("feedback") / 100.0f;
         const float mix = param ("mix") / 100.0f;
         const bool pingPong = param ("pingpong") > 0.5f;
@@ -430,8 +440,12 @@ public:
         gate.setRatio (param ("ratio"));
         gate.setAttack (param ("attack"));
         gate.setRelease (param ("release"));
+        measureIn (buffer);
         juce::dsp::AudioBlock<float> block (buffer.getArrayOfWritePointers(), 2, (size_t) buffer.getNumSamples());
         gate.process (juce::dsp::ProcessContextReplacing<float> (block));
+        measureOut (buffer);
+        if (historyTick (buffer.getNumSamples())) pushHistory (inputDb.load());
+        meterValue = outputDb.load() - inputDb.load();   // how much the gate is closing
     }
 
 private:
@@ -500,6 +514,8 @@ public:
             beat += beatsPerSample;
         }
         freeBeats = beat;
+        phase = (float) std::fmod (beat / step, 8.0);   // which of the 8 steps is playing
+        meterValue = env;
     }
 
 private:
@@ -540,6 +556,8 @@ public:
         phaser.setCentreFrequency (param ("centre"));
         phaser.setFeedback (param ("feedback") / 100.0f);
         phaser.setMix (param ("mix") / 100.0f);
+        measureIn (buffer);
+        phase = (float) std::fmod (phase.load() + param ("rate") * buffer.getNumSamples() / currentSampleRate, 1.0);
         juce::dsp::AudioBlock<float> block (buffer.getArrayOfWritePointers(), 2, (size_t) buffer.getNumSamples());
         phaser.process (juce::dsp::ProcessContextReplacing<float> (block));
     }
@@ -581,6 +599,8 @@ public:
         chorus.setCentreDelay (param ("delay"));
         chorus.setFeedback (param ("feedback") / 100.0f);
         chorus.setMix (param ("mix") / 100.0f);
+        measureIn (buffer);
+        phase = (float) std::fmod (phase.load() + param ("rate") * buffer.getNumSamples() / currentSampleRate, 1.0);
         juce::dsp::AudioBlock<float> block (buffer.getArrayOfWritePointers(), 2, (size_t) buffer.getNumSamples());
         chorus.process (juce::dsp::ProcessContextReplacing<float> (block));
     }
@@ -788,6 +808,10 @@ private:
     int graphHeight = 0;
 };
 
-juce::AudioProcessorEditor* BuiltinFx::createEditor() { return new BuiltinFxEditor (*this); }
+juce::AudioProcessorEditor* BuiltinFx::createEditor()
+{
+    if (auto* face = createFaceplate (*this)) return face;
+    return new BuiltinFxEditor (*this);
+}
 
 } // namespace rs

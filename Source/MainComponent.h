@@ -8,6 +8,7 @@
 #include "MixcraftImport.h"
 #include "AbletonImport.h"
 #include "Updater.h"
+#include "UI/MusicalTyping.h"
 
 namespace rs
 {
@@ -70,7 +71,9 @@ private:
                stopButton { "Stop", IconButton::Icon::Stop },
                recordButton { "Record", IconButton::Icon::Record },
                loopButton { "Loop", IconButton::Icon::Loop },
-               clickButton { "Metronome", IconButton::Icon::Metronome };
+               clickButton { "Metronome", IconButton::Icon::Metronome },
+               typingButton { "Musical typing", IconButton::Icon::Piano };
+    MusicalTyping typing { engine.keyboardState };
     juce::Label timeDisplay, bpmLabel;
     juce::Slider bpm;
     juce::TextButton mixdown { "Mix down" }, settingsButton { "Audio setup" }, updateButton { "Update" };
@@ -98,7 +101,7 @@ private:
     juce::TabbedComponent tabs { juce::TabbedButtonBar::TabsAtTop };
     juce::StretchableLayoutManager layout;
     juce::StretchableLayoutResizerBar divider { &layout, 1, false };
-    juce::MidiKeyboardComponent keyboard { engine.keyboardState, juce::MidiKeyboardComponent::horizontalKeyboard };
+    TypingKeyboard keyboard { engine.keyboardState, typing };
     juce::Label keyboardLabel;
 
     std::vector<std::unique_ptr<DeviceWindow>> deviceWindows;

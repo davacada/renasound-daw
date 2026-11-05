@@ -79,6 +79,8 @@ public:
         auto r = getLocalBounds().reduced (6);
         r.removeFromTop (26);                       // colour bar + name
         instrumentRow = r.removeFromTop (24);        // instrument (or input label)
+        r.removeFromTop (4);
+        inputRow = r.removeFromTop (20);             // where the track records from (blank on the master)
         r.removeFromTop (6);
         insertsLabel = r.removeFromTop (14);
 
@@ -145,6 +147,24 @@ public:
             g.drawText (track != nullptr ? "AUDIO" : "STEREO OUT", ir, juce::Justification::centred);
         }
 
+        if (track != nullptr)
+        {
+            auto in = inputRow.toFloat();
+            g.setColour (inputHover ? theme::text.withAlpha (0.1f) : theme::bg.withAlpha (0.6f));
+            g.fillRoundedRectangle (in, 4.0f);
+            g.setColour (theme::textDim);
+            g.setFont (theme::font (9.5f, true));
+            g.drawText ("IN", in.removeFromLeft (24), juce::Justification::centred);
+            juce::Path arrow;
+            auto a = in.removeFromRight (16).withSizeKeepingCentre (7, 4);
+            arrow.addTriangle (a.getX(), a.getY(), a.getRight(), a.getY(), a.getCentreX(), a.getBottom());
+            g.fillPath (arrow);
+            const auto desc = AudioEngine::describeInput (*track);
+            g.setColour (desc == "No input" ? theme::textDim : theme::text);
+            g.setFont (theme::font (11.0f, true));
+            g.drawText (desc, in, juce::Justification::centredLeft, true);
+        }
+
         g.setColour (theme::textDim);
         g.setFont (theme::font (10.0f, true));
         g.drawText ("EFFECTS", insertsLabel, juce::Justification::centredLeft);
@@ -172,14 +192,87 @@ public:
     {
         const bool h = isInstrumentTrack() && instrumentRow.contains (e.getPosition());
         if (h != instrumentHover) { instrumentHover = h; repaint (instrumentRow); }
-        setMouseCursor (h ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
+        const bool ih = track != nullptr && inputRow.contains (e.getPosition());
+        if (ih != inputHover) { inputHover = ih; repaint (inputRow); }
+        setMouseCursor (h || ih ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
     }
 
-    void mouseExit (const juce::MouseEvent&) override { instrumentHover = false; repaint (instrumentRow); }
+    void mouseExit (const juce::MouseEvent&) override { instrumentHover = inputHover = false; repaint(); }
+
+    void showInputMenu()
+    {
+        juce::PopupMenu m;
+        auto& engine = ctx.engine;
+        if (track->type == Track::Type::Audio)
+        {
+            const auto names = engine.getAudioInputNames();
+            m.addSectionHeader ("RECORD FROM");
+            m.addItem (1, "No input", true, track->audioInput < 0);
+            if (names.isEmpty())
+                m.addItem (2, "No audio inputs found (check Audio setup)", false);
+            if (names.size() > 1)
+            {
+                m.addSectionHeader ("STEREO");
+                for (int i = 0; i + 1 < names.size(); i += 2)
+                    m.addItem (200 + i, "In " + juce::String (i + 1) + "+" + juce::String (i + 2) + "   (" + names[i] + " / " + names[i + 1] + ")",
+                               true, track->audioInput == i && track->audioInputStereo);
+            }
+            if (names.size() > 0)
+            {
+                m.addSectionHeader ("MONO");
+                for (int i = 0; i < names.size(); ++i)
+                    m.addItem (100 + i, "In " + juce::String (i + 1) + "   (" + names[i] + ")", true, track->audioInput == i && ! track->audioInputStereo);
+            }
+        }
+        else
+        {
+            const auto names = engine.getMidiInputNames();
+            m.addSectionHeader ("PLAY AND RECORD FROM");
+            m.addItem (1, "All MIDI (keyboard + devices, when this track is selected)", true, track->midiInput.isEmpty());
+            if (names.isEmpty())
+                m.addItem (3, "No MIDI devices connected", false);
+            else
+                m.addSectionHeader ("ONLY THIS DEVICE (always)");
+            for (int i = 0; i < names.size(); ++i)
+                m.addItem (100 + i, names[i], true, track->midiInput == names[i]);
+            m.addSeparator();
+            m.addItem (2, "No input", true, track->midiInput == "none");
+        }
+
+        juce::Component::SafePointer<Strip> sp (this);
+        m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withTargetScreenArea (localAreaToGlobal (inputRow)),
+                         [sp] (int id)
+        {
+            if (sp == nullptr || id == 0) return;
+            auto& t = *sp->track;
+            auto& c = sp->ctx;
+            c.project.beginEdit();
+            {
+                const juce::ScopedLock sl (c.project.lock);
+                if (t.type == Track::Type::Audio)
+                {
+                    if (id == 1)        t.audioInput = -1;
+                    else if (id >= 200) { t.audioInput = id - 200; t.audioInputStereo = true; }
+                    else if (id >= 100) { t.audioInput = id - 100; t.audioInputStereo = false; }
+                }
+                else
+                {
+                    const auto names = c.engine.getMidiInputNames();
+                    if (id == 1)        t.midiInput.clear();
+                    else if (id == 2)   t.midiInput = "none";
+                    else if (id >= 100) t.midiInput = names[id - 100];
+                }
+            }
+            c.engine.resolveMidiInputs();
+            c.project.dirty = true;
+            c.project.changed();
+        });
+    }
 
     void mouseDown (const juce::MouseEvent& e) override
     {
         if (track != nullptr) ctx.selectTrack (track->id);
+        if (track != nullptr && inputRow.contains (e.getPosition())) { showInputMenu(); return; }
         if (isInstrumentTrack() && instrumentRow.contains (e.getPosition()))
         {
             // the arrow (or right-click) changes the instrument; the name opens it
@@ -203,8 +296,8 @@ public:
     juce::TextButton mute { "M" }, solo { "S" };
     juce::Viewport insertView;
     InsertList inserts;
-    juce::Rectangle<int> meterArea, instrumentRow, insertsLabel;
-    bool instrumentHover = false, flash = false;
+    juce::Rectangle<int> meterArea, instrumentRow, inputRow, insertsLabel;
+    bool instrumentHover = false, inputHover = false, flash = false;
 };
 
 // =============================================================================

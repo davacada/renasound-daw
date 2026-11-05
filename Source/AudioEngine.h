@@ -27,6 +27,7 @@ public:
 // =============================================================================
 class AudioEngine : public juce::AudioIODeviceCallback,
                     public juce::MidiInputCallback,
+                    private juce::ChangeListener,
                     public juce::AudioPlayHead
 {
 public:
@@ -55,6 +56,12 @@ public:
 
     std::atomic<bool> metronomeOn { false };
     std::atomic<int> liveInputTrackId { -1 };     // which instrument track the keyboard plays
+
+    // ---- inputs (message thread) ----
+    juce::StringArray getAudioInputNames() const;                 // hardware inputs of the current device
+    juce::StringArray getMidiInputNames() const { return midiInputNames; }
+    void resolveMidiInputs();                                     // after a track's MIDI input changed
+    static juce::String describeInput (const Track&);             // "1+2", "In 3", "All MIDI", ...
 
     // ---- library preview ----
     void preview (AudioDataPtr);
@@ -85,17 +92,33 @@ private:
     bool wasPlaying = false;
 
     juce::AudioBuffer<float> master;
-    juce::MidiMessageCollector midiCollector;
-    juce::MidiBuffer liveMidi;
+    juce::MidiMessageCollector midiCollector;     // on-screen / computer keyboard and unknown devices
+    juce::MidiBuffer liveMidi;                    // what the selected track hears
+
+    // MIDI devices, each with its own queue so a track can listen to just one
+    static constexpr int maxMidiDevices = 16;
+    juce::StringArray midiInputNames, midiInputIds;
+    std::array<juce::MidiMessageCollector, maxMidiDevices> deviceCollectors;
+    std::array<juce::MidiBuffer, maxMidiDevices> deviceMidi;
+    std::atomic<juce::uint32> claimedDevices { 0 };   // devices given to a particular track
+    const juce::MidiBuffer* midiFor (const Track&, int midiSource) const;
+
+    // hardware input channel -> position in the callback's input array (-1 = inactive)
+    std::array<int, 64> inputPos {};
+    juce::HeapBlock<float> silence;
+    void enableAllInputs();
+    void changeListenerCallback (juce::ChangeBroadcaster*) override { enableAllInputs(); }
 
     // recording
     juce::TimeSliceThread writerThread { "Renasound recorder" };
-    std::unique_ptr<juce::AudioFormatWriter::ThreadedWriter> threadedWriter;
-    std::atomic<juce::AudioFormatWriter::ThreadedWriter*> activeWriter { nullptr };
-    juce::File recordingFile;
+    struct Take { int trackId; int left, right; juce::File file; std::unique_ptr<juce::AudioFormatWriter::ThreadedWriter> writer; };
+    std::vector<Take> takes;                         // one per armed audio track (message thread)
+    struct RecSlot { juce::AudioFormatWriter::ThreadedWriter* writer = nullptr; int left = 0, right = 0; };
+    std::array<RecSlot, 64> recSlots;                // what the audio thread writes
+    std::atomic<int> numRecSlots { 0 };
     double recordStartBeat = 0;
-    int recordTrackId = -1;
     int recordInstrumentTrackId = -1;
+    int recordMidiSource = -1;
     std::vector<MidiNote> recordedNotes;            // audio thread fills, message thread reads after stop
     std::array<double, 128> heldNoteStart {};
     std::array<float, 128> heldNoteVelocity {};

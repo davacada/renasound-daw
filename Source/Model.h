@@ -202,6 +202,15 @@ struct Track
     bool mute = false, solo = false, armed = false;
     std::vector<ClipPtr> clips;
 
+    // Where the track records from.
+    //   Audio tracks: a hardware input (first channel, 0-based; -1 = none), mono or a stereo pair.
+    //   Instrument tracks: "" = follows the selection (on-screen / computer keyboard and every MIDI
+    //   device that isn't given to another track), "none", or a MIDI device's name.
+    int audioInput = 0;
+    bool audioInputStereo = true;
+    juce::String midiInput;
+    std::atomic<int> midiInputIndex { -1 };   // resolved by the engine: -1 follows selection, -2 none, >= 0 device
+
     // Instrument tracks: the built-in synth, or a plugin instrument if `instrument` is set
     std::unique_ptr<RenaSynth> synth;
     FxPtr instrument;

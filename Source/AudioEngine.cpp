@@ -96,9 +96,16 @@ AudioEngine::AudioEngine (Project& p) : project (p)
     std::unique_ptr<juce::XmlElement> saved;
     if (settingsFile.existsAsFile()) saved = juce::parseXML (settingsFile);
     deviceManager.initialise (2, 2, saved.get(), true);
+    silence.calloc (16384);
+    inputPos.fill (-1);
+    enableAllInputs();
+    deviceManager.addChangeListener (this);
 
     for (auto& m : juce::MidiInput::getAvailableDevices())
+    {
         deviceManager.setMidiInputDeviceEnabled (m.identifier, true);
+        if (midiInputIds.size() < maxMidiDevices) { midiInputIds.add (m.identifier); midiInputNames.add (m.name); }
+    }
     deviceManager.addMidiInputDeviceCallback ({}, this);
 
     deviceManager.addAudioCallback (this);
@@ -106,6 +113,7 @@ AudioEngine::AudioEngine (Project& p) : project (p)
 
 AudioEngine::~AudioEngine()
 {
+    deviceManager.removeChangeListener (this);
     if (recording) finishRecording();
     deviceManager.removeAudioCallback (this);
     deviceManager.removeMidiInputDeviceCallback ({}, this);
@@ -172,42 +180,53 @@ void AudioEngine::startRecording()
 {
     if (recording) return;
 
-    recordTrackId = -1;
+    struct Want { int id, left, right; };
+    std::vector<Want> wanted;
     recordInstrumentTrackId = -1;
     {
         const juce::ScopedLock sl (project.lock);
         for (auto& t : project.tracks)
         {
             if (! t->armed) continue;
-            if (t->type == Track::Type::Audio && recordTrackId < 0)            recordTrackId = t->id;
-            if (t->type == Track::Type::Instrument && recordInstrumentTrackId < 0) recordInstrumentTrackId = t->id;
+            if (t->type == Track::Type::Audio && t->audioInput >= 0)
+                wanted.push_back ({ t->id, t->audioInput, t->audioInput + (t->audioInputStereo ? 1 : 0) });
+            if (t->type == Track::Type::Instrument && recordInstrumentTrackId < 0)
+            {
+                recordInstrumentTrackId = t->id;
+                recordMidiSource = t->midiInputIndex.load();
+            }
         }
     }
-    if (recordTrackId < 0 && recordInstrumentTrackId < 0)
+    if (wanted.empty() && recordInstrumentTrackId < 0)
         return;
 
     recordStartBeat = getPositionBeats();
 
-    if (recordTrackId >= 0)
+    // one file per armed audio track, each from its own input
+    takes.clear();
+    const auto stamp = juce::Time::getCurrentTime().formatted ("%Y-%m-%d %H-%M-%S");
+    for (auto& w : wanted)
     {
-        recordingFile = getRecordingsFolder().getNonexistentChildFile (
-            "Take " + juce::Time::getCurrentTime().formatted ("%Y-%m-%d %H-%M-%S"), ".wav");
-
+        Take take { w.id, w.left, w.right, {}, nullptr };
+        take.file = getRecordingsFolder().getNonexistentChildFile ("Take " + stamp + (wanted.size() > 1 ? " T" + juce::String (w.id) : juce::String()), ".wav");
         juce::WavAudioFormat wav;
-        std::unique_ptr<juce::OutputStream> stream (recordingFile.createOutputStream());
-        if (stream != nullptr)
-        {
-            auto writer = wav.createWriterFor (stream, juce::AudioFormatWriterOptions{}
-                                                           .withSampleRate (sampleRate)
-                                                           .withNumChannels (2)
-                                                           .withBitsPerSample (24));
-            if (writer != nullptr)
-            {
-                threadedWriter = std::make_unique<juce::AudioFormatWriter::ThreadedWriter> (writer.release(), writerThread, 1 << 18);
-                activeWriter = threadedWriter.get();
-            }
-        }
-        if (activeWriter.load() == nullptr) recordTrackId = -1;
+        std::unique_ptr<juce::OutputStream> stream (take.file.createOutputStream());
+        if (stream == nullptr) continue;
+        auto writer = wav.createWriterFor (stream, juce::AudioFormatWriterOptions{}
+                                                       .withSampleRate (sampleRate)
+                                                       .withNumChannels (2)
+                                                       .withBitsPerSample (24));
+        if (writer == nullptr) continue;
+        take.writer = std::make_unique<juce::AudioFormatWriter::ThreadedWriter> (writer.release(), writerThread, 1 << 18);
+        takes.push_back (std::move (take));
+    }
+
+    {
+        const juce::SpinLock::ScopedLockType sl (previewLock);
+        int n = 0;
+        for (auto& t : takes)
+            if (n < (int) recSlots.size()) recSlots[(size_t) n++] = { t.writer.get(), t.left, t.right };
+        numRecSlots = n;
     }
 
     {
@@ -228,15 +247,17 @@ void AudioEngine::finishRecording()
 
     {
         const juce::SpinLock::ScopedLockType sl (previewLock);
-        activeWriter = nullptr;
+        numRecSlots = 0;
     }
-    threadedWriter.reset();   // flushes and closes the file
+    for (auto& t : takes) t.writer.reset();   // flushes and closes the files
 
     bool added = false;
     project.beginEdit();
 
-    if (recordTrackId >= 0 && recordingFile.existsAsFile() && recordingFile.getSize() > 100)
-        added = project.addAudioClip (recordTrackId, recordingFile, recordStartBeat) != nullptr || added;
+    for (auto& t : takes)
+        if (t.file.existsAsFile() && t.file.getSize() > 100)
+            added = project.addAudioClip (t.trackId, t.file, recordStartBeat) != nullptr || added;
+    takes.clear();
 
     if (recordInstrumentTrackId >= 0)
     {
@@ -306,6 +327,15 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
     blockSize = device->getCurrentBufferSizeSamples();
     master.setSize (2, blockSize * 2);
     midiCollector.reset (sampleRate);
+    for (auto& c : deviceCollectors) c.reset (sampleRate);
+    for (auto& b : deviceMidi) b.ensureSize (2048);
+
+    {
+        const auto active = device->getActiveInputChannels();
+        int pos = 0;
+        for (int ch = 0; ch < (int) inputPos.size(); ++ch)
+            inputPos[(size_t) ch] = active[ch] ? pos++ : -1;
+    }
 
     maxBlock = juce::jmax (1024, blockSize);
     fxTemp.setSize (8, maxBlock);
@@ -434,9 +464,70 @@ juce::Optional<juce::AudioPlayHead::PositionInfo> AudioEngine::getPosition() con
 
 void AudioEngine::audioDeviceStopped() {}
 
-void AudioEngine::handleIncomingMidiMessage (juce::MidiInput*, const juce::MidiMessage& m)
+void AudioEngine::handleIncomingMidiMessage (juce::MidiInput* source, const juce::MidiMessage& m)
 {
-    midiCollector.addMessageToQueue (m);
+    const int i = source != nullptr ? midiInputIds.indexOf (source->getIdentifier()) : -1;
+    if (i >= 0) deviceCollectors[(size_t) i].addMessageToQueue (m);
+    else        midiCollector.addMessageToQueue (m);
+}
+
+const juce::MidiBuffer* AudioEngine::midiFor (const Track& t, int source) const
+{
+    if (source == -1) return t.id == liveInputTrackId.load() ? &liveMidi : nullptr;
+    if (source >= 0 && source < midiInputIds.size()) return &deviceMidi[(size_t) source];
+    return nullptr;
+}
+
+void AudioEngine::resolveMidiInputs()
+{
+    juce::uint32 claimed = 0;
+    const juce::ScopedLock sl (project.lock);
+    for (auto& t : project.tracks)
+    {
+        int idx = -1;
+        if (t->midiInput == "none") idx = -2;
+        else if (t->midiInput.isNotEmpty())
+        {
+            idx = midiInputNames.indexOf (t->midiInput);
+            if (idx < 0) idx = -2;   // that device isn't connected right now
+        }
+        t->midiInputIndex = idx;
+        if (idx >= 0) claimed |= (1u << idx);
+    }
+    claimedDevices = claimed;
+}
+
+juce::StringArray AudioEngine::getAudioInputNames() const
+{
+    if (auto* dev = deviceManager.getCurrentAudioDevice()) return dev->getInputChannelNames();
+    return {};
+}
+
+void AudioEngine::enableAllInputs()
+{
+    // every hardware input is switched on; each track picks the one it records from
+    auto* dev = deviceManager.getCurrentAudioDevice();
+    if (dev == nullptr) return;
+    const int n = juce::jmin (64, dev->getInputChannelNames().size());
+    auto setup = deviceManager.getAudioDeviceSetup();
+    if (n == 0 || (! setup.useDefaultInputChannels && setup.inputChannels.countNumberOfSetBits() >= n)) return;
+    setup.useDefaultInputChannels = false;
+    setup.inputChannels.clear();
+    setup.inputChannels.setRange (0, n, true);
+    deviceManager.setAudioDeviceSetup (setup, true);
+}
+
+juce::String AudioEngine::describeInput (const Track& t)
+{
+    if (t.type == Track::Type::Audio)
+    {
+        if (t.audioInput < 0) return "No input";
+        return t.audioInputStereo ? "In " + juce::String (t.audioInput + 1) + "+" + juce::String (t.audioInput + 2)
+                                  : "In " + juce::String (t.audioInput + 1);
+    }
+    if (t.midiInput.isEmpty()) return "All MIDI";
+    if (t.midiInput == "none") return "No input";
+    return t.midiInput;
 }
 
 void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* in, int numIn, float* const* out, int numOut,
@@ -448,6 +539,14 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* in, int 
     // ---- live MIDI from hardware + on-screen keyboard ----
     liveMidi.clear();
     midiCollector.removeNextBlockOfMessages (liveMidi, numSamples);
+    const auto claimed = claimedDevices.load();
+    for (int i = 0; i < midiInputIds.size(); ++i)
+    {
+        auto& dm = deviceMidi[(size_t) i];
+        dm.clear();
+        deviceCollectors[(size_t) i].removeNextBlockOfMessages (dm, numSamples);
+        if ((claimed & (1u << i)) == 0) liveMidi.addEvents (dm, 0, numSamples, 0);   // nobody claimed it: the selected track hears it
+    }
     keyboardState.processNextMidiBuffer (liveMidi, 0, numSamples, true);
 
     const bool run = playing.load();
@@ -459,13 +558,24 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* in, int 
         const juce::SpinLock::ScopedTryLockType sl (previewLock);
         if (sl.isLocked())
         {
-            if (auto* w = activeWriter.load(); w != nullptr && numIn > 0 && in[0] != nullptr)
+            auto chan = [&] (int hw) -> const float*
             {
-                const float* chans[2] = { in[0], (numIn > 1 && in[1] != nullptr) ? in[1] : in[0] };
-                w->write (chans, numSamples);
-            }
+                const int p = hw >= 0 && hw < (int) inputPos.size() ? inputPos[(size_t) hw] : -1;
+                return p >= 0 && p < numIn && in[p] != nullptr ? in[p] : silence.get();
+            };
+            if (numSamples <= 16384)
+                for (int i = 0; i < numRecSlots.load(); ++i)
+                {
+                    const auto& slot = recSlots[(size_t) i];
+                    const float* chans[2] = { chan (slot.left), chan (slot.right) };
+                    slot.writer->write (chans, numSamples);
+                }
             if (recordInstrumentTrackId >= 0)
-                captureLiveNotes (liveMidi, startPos, numSamples);
+            {
+                const auto* src = recordMidiSource == -1 ? &liveMidi
+                                : recordMidiSource >= 0 && recordMidiSource < midiInputIds.size() ? &deviceMidi[(size_t) recordMidiSource] : nullptr;
+                if (src != nullptr) captureLiveNotes (*src, startPos, numSamples);
+            }
         }
     }
 
@@ -775,8 +885,9 @@ void AudioEngine::renderTrack (Track& t, double startSec, int numSamples, bool t
             }
     }
 
-    if (includeLive && t.id == liveInputTrackId.load())
-        for (const auto meta : live)
+    juce::ignoreUnused (live);
+    if (const auto* src = includeLive ? midiFor (t, t.midiInputIndex.load()) : nullptr)
+        for (const auto meta : *src)
             if (meta.samplePosition >= liveOffset && meta.samplePosition < liveOffset + numSamples)
                 midi.addEvent (meta.getMessage(), meta.samplePosition - liveOffset);
 

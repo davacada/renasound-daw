@@ -49,9 +49,27 @@ public:
     std::atomic<float> meterValue { 0.0f };                // e.g. gain reduction in dB
     juce::String meterLabel;
 
+    // live readings for the faceplates (written by the audio thread)
+    std::atomic<float> inputDb { -100.0f }, outputDb { -100.0f }, phase { 0.0f };
+    static constexpr int historySize = 240;
+    std::array<std::atomic<float>, historySize> history {};   // one value every ~15 ms, meaning depends on the effect
+    std::atomic<int> historyPos { 0 };
+    void pushHistory (float v) { const int p = historyPos.load(); history[(size_t) p] = v; historyPos = (p + 1) % historySize; }
+    // measures a block before / after processing and keeps the history ticking
+    void measureIn (const juce::AudioBuffer<float>& b)  { inputDb = juce::Decibels::gainToDecibels (b.getMagnitude (0, b.getNumSamples()), -100.0f); }
+    void measureOut (const juce::AudioBuffer<float>& b) { outputDb = juce::Decibels::gainToDecibels (b.getMagnitude (0, b.getNumSamples()), -100.0f); }
+    bool historyTick (int numSamples)
+    {
+        historyAcc += numSamples;
+        if (historyAcc < (int) (currentSampleRate * 0.015)) return false;
+        historyAcc = 0;
+        return true;
+    }
+
 protected:
     juce::String fxId, fxName;
     double currentSampleRate = 44100.0;
+    int historyAcc = 0;
     // tempo from the host (RENASOUND's transport)
     double getBpm() const;
     std::optional<double> getPpq() const;
@@ -61,6 +79,9 @@ struct BuiltinFxInfo { juce::String id, name, description; };
 const std::vector<BuiltinFxInfo>& getBuiltinFxList();
 std::unique_ptr<BuiltinFx> createBuiltinFx (const juce::String& id);
 std::unique_ptr<BuiltinFx> createDynamicEq();   // StudioEq.cpp
+
+// Each built-in effect's own faceplate (Faceplates.cpp); nullptr = the generic knob panel
+juce::AudioProcessorEditor* createFaceplate (BuiltinFx&);
 std::unique_ptr<BuiltinFx> createTubeEq();
 
 } // namespace rs

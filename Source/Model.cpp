@@ -352,6 +352,9 @@ std::unique_ptr<juce::XmlElement> Project::toXml() const
         te->setAttribute ("mute", t->mute);
         te->setAttribute ("solo", t->solo);
         te->setAttribute ("armed", t->armed);
+        te->setAttribute ("audioInput", t->audioInput);
+        te->setAttribute ("audioInputStereo", t->audioInputStereo);
+        if (t->midiInput.isNotEmpty()) te->setAttribute ("midiInput", t->midiInput);
         if (t->synth) te->setAttribute ("preset", t->synth->presetIndex.load());
         if (t->instrument) fxToXml (*t->instrument, *te, "INSTRUMENT");
         for (auto& f : t->fx) fxToXml (*f, *te, "FX");
@@ -566,6 +569,9 @@ void Project::fromXml (const juce::XmlElement& root)
         t->mute = te->getBoolAttribute ("mute");
         t->solo = te->getBoolAttribute ("solo");
         t->armed = te->getBoolAttribute ("armed");
+        t->audioInput = te->getIntAttribute ("audioInput", 0);
+        t->audioInputStereo = te->getBoolAttribute ("audioInputStereo", true);
+        t->midiInput = te->getStringAttribute ("midiInput");
         if (t->type == Track::Type::Instrument)
         {
             t->synth = std::make_unique<RenaSynth>();

@@ -779,6 +779,7 @@ public:
         const int chans = juce::jmin (2, buffer.getNumChannels());
         if (chans == 0) return;
 
+        measureIn (buffer);
         const auto v = values();
         if (! lastSet || std::memcmp (&v, &last, sizeof (Values)) != 0)
         {
