@@ -252,6 +252,16 @@ public:
     juce::CriticalSection lock;
 
     double bpm = 120.0;
+    // the song's details and how it was last mixed down (the Mix down window)
+    struct SongDetails
+    {
+        juce::String title, artist, album, writers, producers, coverPath;
+        int format = 0, bitDepth = 24, oggKbps = 256;   // format: 0 WAV, 1 AIFF, 2 FLAC, 3 Ogg
+        double sampleRate = 0;                           // 0 = the project's rate
+        bool stems = false, stemsWithMix = true;
+    } song;
+    int countIn = 0;   // clicks before recording starts: 0 none, 1-4 clicks, 101 = 1 bar, 102 = 2 bars
+    int countInBeats() const { return countIn > 100 ? (countIn - 100) * beatsPerBar : countIn; }
     int beatsPerBar = 4;
     bool loopEnabled = false;
     double loopStart = 0, loopEnd = 16;   // beats

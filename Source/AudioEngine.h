@@ -67,6 +67,8 @@ public:
     void startRecording();
     bool isPlaying() const          { return playing.load(); }
     bool isRecording() const        { return recording.load(); }
+    bool isCountingIn() const       { return countInLeft.load() > 0; }
+    int countInBeatsLeft() const;   // for the clock while counting in
     double getPositionBeats() const;
     void setPositionBeats (double);
 
@@ -85,6 +87,11 @@ public:
 
     // ---- mixdown ----
     bool renderToFile (const juce::File&, juce::String& errorOut);
+    // renders the song (or one track, for a stem) into `out` at the engine's sample rate.
+    // progress gets 0..1 and can return false to cancel. Safe to call from a background thread.
+    bool renderMix (juce::AudioBuffer<float>& out, int soloTrackId, bool withMasterProcessing,
+                    const std::function<bool (double)>& progress, juce::String& errorOut);
+    double getSampleRate() const { return sampleRate; }
 
     static juce::File getRecordingsFolder();
 
@@ -133,6 +140,13 @@ private:
     std::array<RecSlot, 64> recSlots;                // what the audio thread writes
     std::array<std::atomic<int>, 64> recPeakCount {};
     std::atomic<int> soloClipId { 0 };
+    std::atomic<int> renderSoloTrack { 0 };   // mixdown of one stem
+    // count-in: clicks before recording starts
+    std::atomic<int> countInLeft { 0 };
+    int countInTotal = 0, countInBeatLen = 1, ciSamplesLeft = 0;
+    double ciPhase = 0;
+    bool ciAccent = false;
+    juce::AudioBuffer<float> countInBuf;
     double soloClipReturnBeat = 0;
     std::atomic<int> numRecSlots { 0 };
     double recordStartBeat = 0;

@@ -1,4 +1,5 @@
 #include "AudioEngine.h"
+#include "Export.h"
 #include "Devices.h"
 #include "Drums.h"
 
@@ -154,8 +155,20 @@ void AudioEngine::play()
     playing = true;
 }
 
+int AudioEngine::countInBeatsLeft() const
+{
+    const int left = countInLeft.load();
+    return left <= 0 ? 0 : left / juce::jmax (1, countInBeatLen) + 1;
+}
+
 void AudioEngine::stop()
 {
+    if (countInLeft.load() > 0)   // stopped during the count-in: nothing was recorded
+    {
+        countInLeft = 0;
+        finishRecording();
+        return;
+    }
     if (soloClipId.load() != 0)
     {
         playing = false;
@@ -293,6 +306,16 @@ void AudioEngine::startRecording()
         heldNoteStart.fill (-1.0);
     }
 
+    const int beats = project.countInBeats();
+    if (beats > 0)
+    {
+        // count in first; the audio thread starts recording when the last click is done
+        countInBeatLen = juce::jmax (1, (int) std::lround (60.0 / project.bpm * sampleRate));
+        countInTotal = countInBeatLen * beats;
+        ciSamplesLeft = 0;
+        countInLeft = countInTotal;
+        return;
+    }
     recording = true;
     playing = true;
 }
@@ -312,8 +335,12 @@ void AudioEngine::finishRecording()
     project.beginEdit();
 
     for (auto& t : takes)
+    {
         if (t.file.existsAsFile() && t.file.getSize() > 100)
             added = project.addAudioClip (t.trackId, t.file, recordStartBeat) != nullptr || added;
+        else
+            t.file.deleteFile();   // nothing was recorded (e.g. stopped during the count-in)
+    }
     takes.clear();
 
     if (recordInstrumentTrackId >= 0)
@@ -606,6 +633,41 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* in, int 
     }
     keyboardState.processNextMidiBuffer (liveMidi, 0, numSamples, true);
 
+    // ---- count-in before recording ----
+    bool countedIn = false;
+    if (const int left0 = countInLeft.load(); left0 > 0)
+    {
+        if (countInBuf.getNumSamples() < numSamples) countInBuf.setSize (1, numSamples, false, false, true);
+        auto* c = countInBuf.getWritePointer (0);
+        int left = left0;
+        for (int i = 0; i < numSamples; ++i)
+        {
+            float v = 0.0f;
+            if (left > 0)
+            {
+                const int pos = countInTotal - left;
+                if (pos % countInBeatLen == 0)
+                {
+                    ciSamplesLeft = (int) (0.03 * sampleRate);
+                    ciPhase = 0;
+                    ciAccent = (pos / countInBeatLen) % juce::jmax (1, project.beatsPerBar) == 0;
+                }
+                --left;
+            }
+            if (ciSamplesLeft > 0)
+            {
+                const float env = (float) ciSamplesLeft / (float) (0.03 * sampleRate);
+                v = 0.4f * env * env * (float) std::sin (ciPhase);
+                ciPhase += juce::MathConstants<double>::twoPi * (ciAccent ? 1600.0 : 1100.0) / sampleRate;
+                --ciSamplesLeft;
+            }
+            c[i] = v;
+        }
+        countInLeft = left;
+        countedIn = true;
+        if (left <= 0) { recording = true; playing = true; }   // the count is done: go
+    }
+
     const bool run = playing.load();
     const double startPos = positionSeconds.load();
 
@@ -694,6 +756,8 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* in, int 
     playheadRunning = run;
     processMaster (mix, startPos, numSamples);
     softClip (mix, numSamples);
+    if (countedIn)
+        for (int ch = 0; ch < 2; ++ch) mix.addFrom (ch, 0, countInBuf, 0, 0, numSamples);
     project.masterMeterL = juce::jmax (mix.getMagnitude (0, 0, numSamples), project.masterMeterL.load() * 0.85f);
     project.masterMeterR = juce::jmax (mix.getMagnitude (1, 0, numSamples), project.masterMeterR.load() * 0.85f);
 
@@ -852,7 +916,10 @@ void AudioEngine::renderBlock (juce::AudioBuffer<float>& out, double startSec, i
             for (int ch = 0; ch < 2; ++ch) t.sidechainOut.copyFrom (ch, 0, t.scratch, ch, 0, numSamples);
         }
 
-        const bool audible = soloClip != 0 ? &t == soloClipTrack : ! t.mute && (! anySolo || t.solo);
+        const int soloRender = renderSoloTrack.load();
+        const bool audible = soloClip != 0   ? &t == soloClipTrack
+                           : soloRender != 0 ? t.id == soloRender            // a stem: just this track
+                                             : ! t.mute && (! anySolo || t.solo);
         auto left  = [] (float v, float p) { return v * juce::jmin (1.0f, 1.0f - p); };
         auto right = [] (float v, float p) { return v * juce::jmin (1.0f, 1.0f + p); };
         t.scratch.applyGainRamp (0, 0, numSamples, left (vol0, pan0), left (vol1, pan1));
@@ -1037,24 +1104,17 @@ void AudioEngine::captureLiveNotes (const juce::MidiBuffer& live, double blockSt
 // =============================================================================
 //  Mixdown
 // =============================================================================
-bool AudioEngine::renderToFile (const juce::File& file, juce::String& error)
+bool AudioEngine::renderMix (juce::AudioBuffer<float>& out, int soloTrackId, bool withMaster, const std::function<bool (double)>& progress, juce::String& error)
 {
-    stop();
+    if (project.getEndBeat() <= 0) { error = "The project is empty."; return false; }
     const juce::ScopedLock sl (project.lock);   // the live callback goes silent while we render
 
-    const double totalSec = project.getEndBeat() * 60.0 / project.bpm + 4.0;   // room for reverb / delay tails
-    if (project.getEndBeat() <= 0) { error = "The project is empty."; return false; }
-
-    file.deleteFile();
-    juce::WavAudioFormat wav;
-    std::unique_ptr<juce::OutputStream> stream (file.createOutputStream());
-    if (stream == nullptr) { error = "Couldn't write to " + file.getFullPathName(); return false; }
-
-    auto writer = wav.createWriterFor (stream, juce::AudioFormatWriterOptions{}
-                                                   .withSampleRate (sampleRate)
-                                                   .withNumChannels (2)
-                                                   .withBitsPerSample (24));
-    if (writer == nullptr) { error = "Couldn't create the WAV file."; return false; }
+    const double songSec = project.getEndBeat() * 60.0 / project.bpm;
+    const double totalSec = songSec + 6.0;   // room for reverb / delay tails, trimmed below
+    const auto total = (juce::int64) (totalSec * sampleRate);
+    if (total > (juce::int64) std::numeric_limits<int>::max() / 2) { error = "The song is too long to mix down."; return false; }
+    out.setSize (2, (int) total);
+    out.clear();
 
     auto forEachProcessor = [this] (auto&& fn)
     {
@@ -1066,29 +1126,45 @@ bool AudioEngine::renderToFile (const juce::File& file, juce::String& error)
         for (auto& f : project.masterFx) if (f->processor) fn (*f->processor);
     };
     forEachProcessor ([] (juce::AudioProcessor& p) { p.setNonRealtime (true); p.reset(); });
+    for (auto& t : project.tracks) if (t->synth) t->synth->allNotesOff();
 
     allNotesOff();
+    renderSoloTrack = soloTrackId;
     const int block = 512;
-    juce::AudioBuffer<float> buf (2, block);
     juce::MidiBuffer none;
     for (auto& t : project.tracks)
         if (t->scratch.getNumSamples() < block) t->scratch.setSize (2, block);
 
-    const auto total = (juce::int64) (totalSec * sampleRate);
+    bool cancelled = false;
     for (juce::int64 done = 0; done < total; done += block)
     {
         const int n = (int) std::min<juce::int64> (block, total - done);
-        juce::AudioBuffer<float> sub (buf.getArrayOfWritePointers(), 2, 0, n);
-        sub.clear();
+        juce::AudioBuffer<float> sub (out.getArrayOfWritePointers(), 2, (int) done, n);
         renderBlock (sub, (double) done / sampleRate, n, true, none, 0, false);
         playheadSeconds = (double) done / sampleRate;
-        processMaster (sub, (double) done / sampleRate, n);
+        if (withMaster) processMaster (sub, (double) done / sampleRate, n);
         softClip (sub, n);
-        writer->writeFromAudioSampleBuffer (sub, 0, n);
+        if (progress && (done / block) % 64 == 0 && ! progress ((double) done / (double) total)) { cancelled = true; break; }
     }
+    renderSoloTrack = 0;
     allNotesOff();
     forEachProcessor ([] (juce::AudioProcessor& p) { p.reset(); p.setNonRealtime (false); });
+    if (cancelled) { error = "Cancelled."; return false; }
+
+    // end where the sound has died away (but never before the song ends)
+    int last = (int) (songSec * sampleRate);
+    for (int i = out.getNumSamples() - 1; i > last; --i)
+        if (std::abs (out.getSample (0, i)) > 1.0e-4f || std::abs (out.getSample (1, i)) > 1.0e-4f) { last = i; break; }
+    out.setSize (2, juce::jmin (out.getNumSamples(), last + (int) (0.05 * sampleRate)), true, false, true);
     return true;
+}
+
+bool AudioEngine::renderToFile (const juce::File& file, juce::String& error)
+{
+    stop();
+    juce::AudioBuffer<float> mix;
+    if (! renderMix (mix, 0, true, {}, error)) return false;
+    return exporter::write (mix, sampleRate, {}, {}, file, error);
 }
 
 } // namespace rs

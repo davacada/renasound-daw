@@ -1,6 +1,7 @@
 #pragma once
 #include "../AudioEngine.h"
 #include "../ClipOps.h"
+#include "../SynthFx.h"
 #include <set>
 #include "Theme.h"
 
@@ -30,7 +31,11 @@ struct AppContext
     // "Soft Pad", or the plugin instrument's name
     static juce::String instrumentName (const Track& t)
     {
-        if (t.instrument != nullptr) return t.instrument->getName();
+        if (t.instrument != nullptr)
+        {
+            if (auto n = getSynthPatchName (t.instrument->processor.get()); n.isNotEmpty()) return n;   // RENASYNTH: its sound's name
+            return t.instrument->getName();
+        }
         if (t.synth == nullptr) return {};
         const auto& presets = getSynthPresets();
         return presets[(size_t) juce::jlimit (0, (int) presets.size() - 1, t.synth->presetIndex.load())].name;

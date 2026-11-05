@@ -1,4 +1,5 @@
 #include "Model.h"
+#include "SynthFx.h"
 
 namespace rs
 {
@@ -135,6 +136,11 @@ TrackPtr Project::addTrack (Track::Type type)
             t->autoName = true;   // takes the instrument's name
             t->synth = std::make_unique<RenaSynth>();
             if (onTrackCreated) onTrackCreated (*t);
+            if (createFx)   // every new instrument track starts with RENASYNTH
+            {
+                juce::String err;
+                t->instrument = createFx ("builtin:synth", nullptr, err);
+            }
         }
         tracks.push_back (t);
     }
@@ -352,6 +358,16 @@ std::unique_ptr<juce::XmlElement> Project::toXml() const
     auto root = std::make_unique<juce::XmlElement> ("RENASOUND_PROJECT");
     root->setAttribute ("version", 1);
     root->setAttribute ("bpm", bpm);
+    if (countIn != 0) root->setAttribute ("countIn", countIn);
+    {
+        auto* se = root->createNewChildElement ("SONG");
+        se->setAttribute ("title", song.title);   se->setAttribute ("artist", song.artist);
+        se->setAttribute ("album", song.album);   se->setAttribute ("writers", song.writers);
+        se->setAttribute ("producers", song.producers); se->setAttribute ("cover", song.coverPath);
+        se->setAttribute ("format", song.format); se->setAttribute ("bits", song.bitDepth);
+        se->setAttribute ("kbps", song.oggKbps);  se->setAttribute ("rate", song.sampleRate);
+        se->setAttribute ("stems", song.stems);   se->setAttribute ("stemsWithMix", song.stemsWithMix);
+    }
     root->setAttribute ("beatsPerBar", beatsPerBar);
     root->setAttribute ("loopEnabled", loopEnabled);
     root->setAttribute ("loopStart", loopStart);
@@ -603,6 +619,13 @@ void Project::fromXml (const juce::XmlElement& root)
         TrackPtr old = oldTracks.count (t->id) ? oldTracks[t->id] : nullptr;
         if (auto* ie = te->getChildByName ("INSTRUMENT"); ie != nullptr && t->type == Track::Type::Instrument)
             t->instrument = fxFromXml (*ie, old != nullptr ? old->instrument : nullptr);
+        else if (t->type == Track::Type::Instrument && createFx)
+        {
+            // projects from before RENASYNTH: the old synth's sound becomes the same RENASYNTH sound
+            juce::String err;
+            if ((t->instrument = createFx ("builtin:synth", nullptr, err)) != nullptr)
+                loadSynthPatch (t->instrument->processor.get(), te->getIntAttribute ("preset", 0));
+        }
         int fxIndex = 0;
         for (auto* fe : te->getChildWithTagNameIterator ("FX"))
         {
@@ -699,6 +722,17 @@ void Project::fromXml (const juce::XmlElement& root)
     {
         const juce::ScopedLock sl (lock);
         bpm = juce::jlimit (20.0, 300.0, root.getDoubleAttribute ("bpm", 120));
+        countIn = root.getIntAttribute ("countIn", 0);
+        song = {};
+        if (auto* se = root.getChildByName ("SONG"))
+        {
+            song.title = se->getStringAttribute ("title");     song.artist = se->getStringAttribute ("artist");
+            song.album = se->getStringAttribute ("album");     song.writers = se->getStringAttribute ("writers");
+            song.producers = se->getStringAttribute ("producers"); song.coverPath = se->getStringAttribute ("cover");
+            song.format = se->getIntAttribute ("format", 0);   song.bitDepth = se->getIntAttribute ("bits", 24);
+            song.oggKbps = se->getIntAttribute ("kbps", 256);  song.sampleRate = se->getDoubleAttribute ("rate", 0);
+            song.stems = se->getBoolAttribute ("stems");       song.stemsWithMix = se->getBoolAttribute ("stemsWithMix", true);
+        }
         beatsPerBar = root.getIntAttribute ("beatsPerBar", 4);
         loopEnabled = root.getBoolAttribute ("loopEnabled");
         loopStart = root.getDoubleAttribute ("loopStart", 0);
@@ -756,6 +790,8 @@ void Project::clear()
         loopEnabled = false;
         loopStart = 0; loopEnd = 16;
         masterVolume = 0.9f;
+        song = {};
+        countIn = 0;
     }
     undoStack.clear();
     redoStack.clear();

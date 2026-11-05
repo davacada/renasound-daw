@@ -1,4 +1,5 @@
 #include "MainComponent.h"
+#include "UI/MixdownPanel.h"
 #include "Devices.h"
 
 namespace rs
@@ -15,6 +16,15 @@ MainComponent::MainComponent()
     typingButton.onClick = [this] { typing.setEnabled (! typing.isEnabled()); };
     typingButton.setTooltip ("Musical typing: play the instrument with your computer keyboard.\n"
                              "A S D F G H J K L = white keys, W E T Y U O P = black keys, Z / X = octave, C / V = velocity");
+    addAndMakeVisible (countInBox);
+    {
+        const std::pair<const char*, int> counts[] { { "No count-in", 0 }, { "1 click", 1 }, { "2 clicks", 2 }, { "3 clicks", 3 },
+                                                     { "4 clicks", 4 }, { "1 bar", 101 }, { "2 bars", 102 } };
+        for (auto& [name, code] : counts) countInBox.addItem (name, code + 1000);
+        countInBox.setSelectedId (1000, juce::dontSendNotification);
+        countInBox.setTooltip ("Count-in: how many metronome clicks play before recording starts");
+        countInBox.onChange = [this] { project.countIn = countInBox.getSelectedId() - 1000; project.dirty = true; };
+    }
     addAndMakeVisible (snapButton);
     addAndMakeVisible (gridBox);
     snapButton.setClickingTogglesState (true);
@@ -353,28 +363,32 @@ void MainComponent::resized()
     auto bar = r.removeFromTop (56).reduced (10, 10);
     bar.removeFromLeft (196);
 
+    // the right-hand buttons first, so they never get squeezed out
+    updateButton.setBounds (bar.removeFromRight (112));   bar.removeFromRight (2);
+    settingsButton.setBounds (bar.removeFromRight (98));  bar.removeFromRight (2);
+    mixdown.setBounds (bar.removeFromRight (86));         bar.removeFromRight (10);
+
+    // the transport shrinks a little on narrow windows
+    const bool tight = bar.getWidth() < 1080;
     for (auto* b : { &toStart, &playButton, &stopButton, &recordButton })
     {
-        b->setBounds (bar.removeFromLeft (44));
-        bar.removeFromLeft (5);
+        b->setBounds (bar.removeFromLeft (tight ? 38 : 44));
+        bar.removeFromLeft (tight ? 3 : 5);
     }
+    bar.removeFromLeft (6);
+    timeDisplay.setBounds (bar.removeFromLeft (tight ? 128 : 170));
     bar.removeFromLeft (8);
-    timeDisplay.setBounds (bar.removeFromLeft (190));
-    bar.removeFromLeft (10);
-    loopButton.setBounds (bar.removeFromLeft (40));  bar.removeFromLeft (5);
-    clickButton.setBounds (bar.removeFromLeft (40)); bar.removeFromLeft (12);
-    bpmLabel.setBounds (bar.removeFromLeft (34));    bar.removeFromLeft (4);
-    bpm.setBounds (bar.removeFromLeft (110));
-    bar.removeFromLeft (8);
-    typingButton.setBounds (bar.removeFromLeft (40));
-    bar.removeFromLeft (8);
-    snapButton.setBounds (bar.removeFromLeft (52).reduced (0, 4));
+    loopButton.setBounds (bar.removeFromLeft (38));  bar.removeFromLeft (3);
+    clickButton.setBounds (bar.removeFromLeft (38)); bar.removeFromLeft (2);
+    countInBox.setBounds (bar.removeFromLeft (94).reduced (0, 4)); bar.removeFromLeft (8);
+    bpmLabel.setBounds (bar.removeFromLeft (30));    bar.removeFromLeft (2);
+    bpm.setBounds (bar.removeFromLeft (100));
+    bar.removeFromLeft (6);
+    typingButton.setBounds (bar.removeFromLeft (38));
+    bar.removeFromLeft (6);
+    snapButton.setBounds (bar.removeFromLeft (50).reduced (0, 4));
     bar.removeFromLeft (2);
-    gridBox.setBounds (bar.removeFromLeft (76).reduced (0, 4));
-
-    updateButton.setBounds (bar.removeFromRight (128));   bar.removeFromRight (4);
-    settingsButton.setBounds (bar.removeFromRight (104)); bar.removeFromRight (6);
-    mixdown.setBounds (bar.removeFromRight (96));         bar.removeFromRight (16);
+    gridBox.setBounds (bar.removeFromLeft (70).reduced (0, 4));
 
     auto keys = r.removeFromBottom (72).reduced (8, 6);
     keyboardLabel.setBounds (keys.removeFromLeft (120));
@@ -422,7 +436,10 @@ void MainComponent::timerCallback()
 
     playButton.setIcon (engine.isPlaying() ? IconButton::Icon::Pause : IconButton::Icon::Play);
     playButton.setToggleState (engine.isPlaying() && ! engine.isRecording(), juce::dontSendNotification);
-    recordButton.setToggleState (engine.isRecording(), juce::dontSendNotification);
+    recordButton.setToggleState (engine.isRecording() || (engine.isCountingIn() && (juce::Time::getMillisecondCounter() / 250) % 2 == 0), juce::dontSendNotification);
+    if (engine.isCountingIn())
+        timeDisplay.setText ("COUNT  " + juce::String (engine.countInBeatsLeft()), juce::dontSendNotification);
+    if (countInBox.getSelectedId() != project.countIn + 1000) countInBox.setSelectedId (project.countIn + 1000, juce::dontSendNotification);
     loopButton.setToggleState (project.loopEnabled, juce::dontSendNotification);
     clickButton.setToggleState (engine.metronomeOn.load(), juce::dontSendNotification);
     if (! bpm.isMouseButtonDown() && std::abs (bpm.getValue() - project.bpm) > 0.01)
@@ -512,7 +529,7 @@ void MainComponent::openPluginManager()
 
 void MainComponent::record()
 {
-    if (engine.isRecording()) { engine.stop(); return; }
+    if (engine.isRecording() || engine.isCountingIn()) { engine.stop(); return; }
 
     bool anyArmed = false;
     for (auto& t : project.tracks) anyArmed = anyArmed || t->armed;
@@ -749,24 +766,24 @@ void MainComponent::exportMixdown()
         showMessage ("Nothing to mix down", "Record or add some clips first.");
         return;
     }
-    auto name = project.file.existsAsFile() ? project.file.getFileNameWithoutExtension() : juce::String ("My Song");
-    chooser = std::make_unique<juce::FileChooser> ("Mix down to WAV",
-                                                   juce::File::getSpecialLocation (juce::File::userMusicDirectory).getChildFile (name + ".wav"), "*.wav");
-    chooser->launchAsync (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::warnAboutOverwriting,
-                          [this] (const juce::FileChooser& fc)
+    auto* panel = new MixdownPanel (ctx);
+    juce::Component::SafePointer<MixdownPanel> sp (panel);
+    panel->onClose = [sp]
     {
-        auto f = fc.getResult();
-        if (f == juce::File()) return;
-        f = f.withFileExtension ("wav");
-        juce::String error;
-        if (engine.renderToFile (f, error))
-        {
-            showMessage ("Mixdown finished", "Saved " + f.getFileName());
-            f.revealToUser();
-        }
-        else
-            showMessage ("Mixdown failed", error);
-    });
+        if (sp != nullptr)
+            if (auto* dw = sp->findParentComponentOfClass<juce::DialogWindow>()) dw->exitModalState (0);
+    };
+    panel->showMessage = [this] (const juce::String& t, const juce::String& m) { showMessage (t, m); };
+
+    juce::DialogWindow::LaunchOptions o;
+    o.content.setOwned (panel);
+    o.dialogTitle = "Mix down";
+    o.dialogBackgroundColour = theme::panel;
+    o.escapeKeyTriggersCloseButton = true;
+    o.useNativeTitleBar = true;
+    o.resizable = false;
+    o.componentToCentreAround = this;
+    o.launchAsync();
 }
 
 void MainComponent::showAudioSettings()

@@ -54,6 +54,24 @@ void devicemenus::showAddEffectMenu (AppContext& ctx, int trackId, juce::Compone
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (target));
 }
 
+void devicemenus::chooseSynthSound (AppContext& ctx, int trackId, int patchIndex)
+{
+    auto track = ctx.project.findTrack (trackId);
+    if (track == nullptr || track->type != Track::Type::Instrument) return;
+    ctx.project.beginEdit();
+    if (track->instrument != nullptr && track->instrument->type == "builtin:synth")
+    {
+        loadSynthPatch (track->instrument->processor.get(), patchIndex);
+        ctx.project.changed();
+        return;
+    }
+    juce::String error;
+    auto slot = ctx.engine.createFx ("builtin:synth", nullptr, error);
+    if (slot == nullptr) { showLoadError ("RENASYNTH", error); return; }
+    loadSynthPatch (slot->processor.get(), patchIndex);
+    ctx.project.setInstrument (trackId, slot);
+}
+
 void devicemenus::showInstrumentMenu (AppContext& ctx, int trackId, juce::Component* target)
 {
     auto track = ctx.project.findTrack (trackId);
@@ -65,16 +83,13 @@ void devicemenus::showInstrumentMenu (AppContext& ctx, int trackId, juce::Compon
         if (ctx.openDevice) ctx.openDevice (track->id, track->instrument, true);
     });
     menu.addSeparator();
-    menu.addSectionHeader ("RENASOUND SYNTH");
-    const auto& presets = getSynthPresets();
-    for (int i = 0; i < (int) presets.size(); ++i)
-        menu.addItem (presets[(size_t) i].name, true, track->instrument == nullptr && track->synth->presetIndex == i, [&ctx, track, i]
-        {
-            if (track->instrument != nullptr) { ctx.project.beginEdit(); ctx.project.setInstrument (track->id, nullptr); }
-            track->synth->presetIndex = i;
-            ctx.project.dirty = true;
-            ctx.project.sendChangeMessage();
-        });
+    menu.addSectionHeader ("RENASYNTH");
+    const bool hasSynth = track->instrument != nullptr && track->instrument->type == "builtin:synth";
+    const auto current = hasSynth ? getSynthPatchName (track->instrument->processor.get()) : juce::String();
+    const auto& patches = getSynthPatches();
+    for (int i = 0; i < (int) patches.size(); ++i)
+        menu.addItem (patches[(size_t) i].name, true, hasSynth && current == patches[(size_t) i].name,
+                      [&ctx, trackId, i] { chooseSynthSound (ctx, trackId, i); });
 
     menu.addSectionHeader ("RENASOUND DRUMS");
     const auto kits = DrumMachine::getKitNames();

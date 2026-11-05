@@ -646,20 +646,18 @@ PianoRoll::PianoRoll (AppContext& c) : ctx (c)
     playClip.onClick = [this] { if (clip != nullptr) ctx.engine.playClip (clip->id); };
 
     addAndMakeVisible (preset);
-    const auto& all = getSynthPresets();
+    const auto& all = getSynthPatches();
     for (int i = 0; i < (int) all.size(); ++i)
         preset.addItem (all[(size_t) i].name, i + 1);
     preset.addSeparator();
-    preset.addItem ("Plugin instrument...", 1000);
+    preset.addItem ("Other instruments...", 1000);
     preset.onChange = [this]
     {
-        if (track == nullptr || track->synth == nullptr) return;
+        if (track == nullptr) return;
         const int id = preset.getSelectedId();
         if (id == 1000) { refreshHeader(); devicemenus::showInstrumentMenu (ctx, track->id, &preset); return; }
         if (id <= 0) return;
-        if (track->instrument != nullptr) { ctx.project.beginEdit(); ctx.project.setInstrument (track->id, nullptr); }
-        track->synth->presetIndex = id - 1;
-        ctx.project.dirty = true;
+        devicemenus::chooseSynthSound (ctx, track->id, id - 1);
     };
     preset.setTooltip ("Instrument sound for this track");
 
@@ -744,11 +742,15 @@ void PianoRoll::refreshHeader()
 {
     title.setText (clip != nullptr ? (track != nullptr ? track->name + "  /  " : juce::String()) + clip->name
                                    : juce::String ("Piano roll"), juce::dontSendNotification);
-    preset.setEnabled (track != nullptr && track->synth != nullptr);
-    if (track != nullptr && track->synth != nullptr)
+    preset.setEnabled (track != nullptr && track->type == Track::Type::Instrument);
+    if (track != nullptr && track->type == Track::Type::Instrument)
     {
-        if (track->instrument != nullptr) preset.setText (track->instrument->getName(), juce::dontSendNotification);
-        else preset.setSelectedId (track->synth->presetIndex + 1, juce::dontSendNotification);
+        const auto name = AppContext::instrumentName (*track);
+        int found = 0;
+        for (int i = 0; i < (int) getSynthPatches().size(); ++i)
+            if (track->instrument != nullptr && track->instrument->type == "builtin:synth" && getSynthPatches()[(size_t) i].name == name) found = i + 1;
+        if (found > 0) preset.setSelectedId (found, juce::dontSendNotification);
+        else preset.setText (name, juce::dontSendNotification);
     }
     quantize.setEnabled (clip != nullptr);
     clearNotes.setEnabled (clip != nullptr);

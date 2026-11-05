@@ -124,11 +124,11 @@ echo "---- $(date) update: app=$APP dmg=$DMG pid=$PID"
 # wait (up to a minute) for RENASOUND to quit
 for i in $(seq 1 200); do kill -0 "$PID" 2>/dev/null || break; sleep 0.3; done
 
-# an app macOS is running from a temporary copy (App Translocation) can't be replaced in place:
+# an app macOS is running from a temporary copy (App Translocation) cannot be replaced in place:
 # put the new one in Applications instead
-case "$APP" in */AppTranslocation/*) APP="/Applications/RENASOUND.app"; echo "translocated: using $APP";; esac
+case "$APP" in *AppTranslocation*) APP="/Applications/RENASOUND.app"; echo "translocated: using $APP";; esac
 DEST_DIR="$(dirname "$APP")"
-if [ ! -w "$DEST_DIR" ]; then echo "can't write to $DEST_DIR"; fi
+if [ ! -w "$DEST_DIR" ]; then echo "cannot write to $DEST_DIR"; fi
 
 manual() {
   echo "falling back to the installer window: $1"
@@ -138,21 +138,21 @@ manual() {
 }
 
 MNT="$(mktemp -d /tmp/renasound-update.XXXXXX)"
-hdiutil attach -nobrowse -noautoopen -mountpoint "$MNT" "$DMG" || manual "couldn't open the download"
+hdiutil attach -nobrowse -noautoopen -mountpoint "$MNT" "$DMG" || manual "could not open the download"
 [ -d "$MNT/RENASOUND.app" ] || { hdiutil detach -quiet "$MNT"; manual "no RENASOUND.app in the download"; }
 
 # copy the new app next to the old one first, then swap them
 rm -rf "$APP.new" "$APP.previous"
 if ! ditto "$MNT/RENASOUND.app" "$APP.new"; then
-  rm -rf "$APP.new"; hdiutil detach -quiet "$MNT"; manual "couldn't copy the new app to $DEST_DIR"
+  rm -rf "$APP.new"; hdiutil detach -quiet "$MNT"; manual "could not copy the new app to $DEST_DIR"
 fi
 hdiutil detach -quiet "$MNT"
 if [ -d "$APP" ] && ! mv "$APP" "$APP.previous"; then
-  rm -rf "$APP.new"; manual "couldn't move the old app aside"
+  rm -rf "$APP.new"; manual "could not move the old app aside"
 fi
 if ! mv "$APP.new" "$APP"; then
   [ -d "$APP.previous" ] && mv "$APP.previous" "$APP"
-  manual "couldn't put the new app in place"
+  manual "could not put the new app in place"
 fi
 rm -rf "$APP.previous"
 xattr -dr com.apple.quarantine "$APP" 2>/dev/null

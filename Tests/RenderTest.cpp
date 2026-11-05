@@ -7,6 +7,8 @@
 #include "../Source/AbletonImport.h"
 #include "../Source/Drums.h"
 #include "../Source/ClipOps.h"
+#include "../Source/SynthFx.h"
+#include "../Source/Export.h"
 
 int main (int argc, char** argv)
 {
@@ -100,6 +102,86 @@ int main (int argc, char** argv)
         { rs::DrumMachine d; auto b = hit (d, [&] (rs::DrumMachine& x) { set (x, "c20", 100); juce::MemoryBlock mb; x.getStateInformation (mb); x.setStateInformation (mb.getData(), (int) mb.getSize()); }); report ("click 100 (resynth)", b); }
         return 0;
     }
+    if (argc >= 3 && juce::String (argv[1]) == "--synth")
+    {
+        // every RENASYNTH sound: a C major chord for 1 s, then released
+        const double sr = 48000.0;
+        const juce::File outDir (argv[2]);
+        outDir.createDirectory();
+        juce::AudioBuffer<float> all (2, (int) (sr * 1.8) * (int) rs::getSynthPatches().size());
+        all.clear();
+        for (int i = 0; i < (int) rs::getSynthPatches().size(); ++i)
+        {
+            auto fx = rs::createBuiltinFx ("synth");
+            rs::loadSynthPatch (fx.get(), i);
+            fx->setPlayConfigDetails (2, 2, sr, 512);
+            fx->prepareToPlay (sr, 512);
+            const int len = (int) (sr * 1.8);
+            juce::AudioBuffer<float> b (2, len);
+            for (int pos = 0; pos < len; pos += 512)
+            {
+                const int n = juce::jmin (512, len - pos);
+                juce::AudioBuffer<float> view (b.getArrayOfWritePointers(), 2, pos, n);
+                juce::MidiBuffer m;
+                if (pos == 0) for (int note : { 48, 60, 64, 67 }) m.addEvent (juce::MidiMessage::noteOn (1, note, 0.8f), 0);
+                if (pos <= (int) sr && pos + n > (int) sr) for (int note : { 48, 60, 64, 67 }) m.addEvent (juce::MidiMessage::noteOff (1, note), (int) sr - pos);
+                fx->processBlock (view, m);
+            }
+            bool finite = true;
+            for (int c = 0; c < 2; ++c) for (int k = 0; k < len; ++k) finite = finite && std::isfinite (b.getSample (c, k));
+            const float peak = b.getMagnitude (0, len), rmsHeld = b.getRMSLevel (0, (int) (sr * 0.2), (int) (sr * 0.6));
+            const float tail = b.getMagnitude (0, len - (int) (sr * 0.05), (int) (sr * 0.05));
+            std::cout << juce::String (rs::getSynthPatchName (fx.get())).paddedRight (' ', 14) << " peak " << juce::String (juce::Decibels::gainToDecibels (peak), 1)
+                      << " dB, held " << juce::String (juce::Decibels::gainToDecibels (rmsHeld), 1) << " dB rms, end " << juce::String (juce::Decibels::gainToDecibels (tail, -120.0f), 1)
+                      << " dB" << (finite ? "" : "  NOT FINITE") << "\n";
+            for (int c = 0; c < 2; ++c) all.copyFrom (c, i * len, b, c, 0, len);
+
+            if (i == 1 || i == 8)   // a picture of the editor with the sound playing
+            {
+                std::unique_ptr<juce::AudioProcessorEditor> ed (fx->createEditor());
+                juce::MidiBuffer m;
+                for (int note : { 48, 60, 64, 67 }) m.addEvent (juce::MidiMessage::noteOn (1, note, 0.8f), 0);
+                juce::AudioBuffer<float> blk (2, 512);
+                fx->processBlock (blk, m);
+                for (int f = 0; f < 30; ++f) { juce::MidiBuffer none; for (int r = 0; r < 4; ++r) fx->processBlock (blk, none); ed->createComponentSnapshot (ed->getLocalBounds()); juce::Thread::sleep (25); }
+                auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);
+                juce::FileOutputStream os (outDir.getChildFile ("synth" + juce::String (i) + ".png"));
+                os.setPosition (0); os.truncate();
+                juce::PNGImageFormat().writeImageToStream (img, os);
+            }
+        }
+        juce::String err;
+        rs::exporter::write (all, sr, {}, {}, outDir.getChildFile ("synth-sounds.wav"), err);
+        return 0;
+    }
+
+    if (argc >= 3 && juce::String (argv[1]) == "--export")
+    {
+        // a 2 s, 440 Hz tone written in every format with the song's details and a cover
+        const double sr = 48000.0;
+        const juce::File dir (argv[2]);
+        dir.createDirectory();
+        juce::AudioBuffer<float> tone (2, (int) sr * 2);
+        for (int i = 0; i < tone.getNumSamples(); ++i) { const float v = 0.5f * (float) std::sin (i * 2.0 * juce::MathConstants<double>::pi * 440.0 / sr); tone.setSample (0, i, v); tone.setSample (1, i, v); }
+        juce::Image cover (juce::Image::RGB, 600, 600, true);
+        { juce::Graphics g (cover); g.fillAll (juce::Colour (0xffd8a96e)); g.setColour (juce::Colours::black); g.fillEllipse (150, 150, 300, 300); }
+        auto coverFile = dir.getChildFile ("cover.png");
+        { coverFile.deleteFile(); juce::FileOutputStream os (coverFile); juce::PNGImageFormat().writeImageToStream (cover, os); }
+        rs::exporter::SongInfo info { "Golden Hour", "Rena", "Sandstone", "D. Vaca, A. Writer", "D. Vaca", coverFile };
+        struct Case { rs::exporter::Format f; int bits; int kbps; double rate; const char* name; };
+        for (auto c : { Case { rs::exporter::Format::Wav, 24, 0, 0, "wav24" }, Case { rs::exporter::Format::Wav, 32, 0, 44100, "wav32-441" },
+                        Case { rs::exporter::Format::Aiff, 16, 0, 0, "aiff16" }, Case { rs::exporter::Format::Flac, 24, 0, 96000, "flac24-96" },
+                        Case { rs::exporter::Format::Ogg, 16, 192, 0, "ogg192" } })
+        {
+            rs::exporter::Settings st; st.format = c.f; st.bitDepth = c.bits; st.oggKbps = c.kbps; st.sampleRate = c.rate;
+            auto f = dir.getChildFile (juce::String (c.name) + rs::exporter::extension (c.f));
+            juce::String err;
+            const bool ok = rs::exporter::write (tone, sr, st, info, f, err);
+            std::cout << c.name << ": " << (ok ? "ok" : err) << " (" << rs::exporter::describe (st) << ") " << f.getSize() << " bytes\n";
+        }
+        return 0;
+    }
+
     if (argc >= 2 && juce::String (argv[1]) == "--clipops")
     {
         rs::AudioCache cache;
@@ -222,6 +304,38 @@ int main (int argc, char** argv)
             }
             std::cout << "play clip: playing id " << engine.getPlayingClipId() << ", out L " << l << " R " << r << " (want equal: only track 2)\n";
             engine.stop();
+        }
+
+        // count-in: one bar of clicks before recording starts
+        {
+            project.countIn = 101;
+            a->armed = true; b->armed = c->armed = false;
+            const double before = engine.getPositionBeats();
+            engine.startRecording();
+            int blocks = 0; float clickPeak = 0;
+            while (engine.isCountingIn() && blocks < 1000)
+            {
+                engine.audioDeviceIOCallbackWithContext (in, 4, out.getArrayOfWritePointers(), 2, 512, {});
+                clickPeak = juce::jmax (clickPeak, out.getMagnitude (0, 0, 512));
+                ++blocks;
+            }
+            std::cout << "count-in: " << blocks * 512 / 48000.0 << " s of clicks (want 2 s at 120 bpm), click level " << clickPeak
+                      << ", recording now " << (engine.isRecording() ? "yes" : "no") << ", playhead moved " << engine.getPositionBeats() - before << " beats\n";
+            for (int i = 0; i < 40; ++i) engine.audioDeviceIOCallbackWithContext (in, 4, out.getArrayOfWritePointers(), 2, 512, {});
+            engine.stop();
+            project.countIn = 0;
+            std::cout << "after count-in take: track 1 has " << a->clips.size() << " clips\n";
+            if (a->clips.size() > 1) { a->clips.back()->audio->file.deleteFile(); project.removeClip (a->clips.back()->id); }
+        }
+
+        // stems: rendering one track gives only that track
+        {
+            juce::AudioBuffer<float> all, one;
+            juce::String err;
+            engine.renderMix (all, 0, true, {}, err);
+            engine.renderMix (one, b->id, false, {}, err);
+            std::cout << "stem of track 2: L " << one.getSample (0, 4800) << " R " << one.getSample (1, 4800) << " (want equal), full mix L " << all.getSample (0, 4800)
+                      << " R " << all.getSample (1, 4800) << " (want different), " << one.getNumSamples() / 48000.0 << " s\n";
         }
 
         // MIDI recording shows up while it records

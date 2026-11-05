@@ -75,6 +75,7 @@ private:
                clickButton { "Metronome", IconButton::Icon::Metronome },
                typingButton { "Musical typing", IconButton::Icon::Piano };
     MusicalTyping typing { engine.keyboardState };
+    juce::ComboBox countInBox;                // clicks before recording starts
     juce::TextButton snapButton { "Snap" };   // snap to grid, with the grid size next to it
     juce::ComboBox gridBox;
     juce::Label timeDisplay, bpmLabel;

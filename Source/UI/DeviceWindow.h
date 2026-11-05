@@ -51,6 +51,8 @@ namespace devicemenus
 {
     void showAddEffectMenu (AppContext&, int trackId, juce::Component* target, std::function<void (FxPtr)> added = {});
     void showInstrumentMenu (AppContext&, int trackId, juce::Component* target);
+    // gives the track RENASYNTH (if it hasn't got it) with one of its factory sounds
+    void chooseSynthSound (AppContext&, int trackId, int patchIndex);
 }
 
 } // namespace rs

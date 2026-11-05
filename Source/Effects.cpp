@@ -1,4 +1,5 @@
 #include "Effects.h"
+#include "SynthFx.h"
 #include "UI/Theme.h"
 #include "DspHelpers.h"
 #include "Devices.h"
@@ -637,6 +638,7 @@ std::unique_ptr<BuiltinFx> createBuiltinFx (const juce::String& id)
     if (id == "punch")      return createPunch();
     if (id == "widener")    return createWidener();
     if (id == "amp")        return createAmp();
+    if (id == "synth")      return createSynth();
     if (id == "kick")       return createKickSynth();
     if (id == "vocoder")    return createVocoder();
     if (id == "sampler")    return createSampler();

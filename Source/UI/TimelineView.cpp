@@ -338,8 +338,15 @@ public:
         if (track->type == Track::Type::Instrument)
         {
             addAndMakeVisible (instrumentPicker);
-            instrumentPicker.setTooltip ("Choose this track's instrument");
-            instrumentPicker.onClick = [this] { devicemenus::showInstrumentMenu (owner.ctx, track->id, &instrumentPicker); };
+            instrumentPicker.setTooltip ("Click to open the instrument and shape its sound; the arrow chooses another instrument");
+            instrumentPicker.onClick = [this]
+            {
+                // the name opens the instrument's panel, the arrow (or a right-click) picks another one
+                const bool onArrow = instrumentPicker.getMouseXYRelative().x > instrumentPicker.getWidth() - 22
+                                  || juce::ModifierKeys::currentModifiers.isPopupMenu();
+                if (! onArrow && owner.ctx.openDevice) owner.ctx.openDevice (track->id, track->instrument, true);
+                else devicemenus::showInstrumentMenu (owner.ctx, track->id, &instrumentPicker);
+            };
         }
 
         addAndMakeVisible (autoButton);
