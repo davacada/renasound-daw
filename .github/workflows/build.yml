@@ -17,7 +17,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
+          - os: macos-15-intel   # Apple Silicon runners are often queued for a long time; the app is still universal
             file: RENASOUND-macOS.dmg
           - os: windows-latest
             file: RENASOUND-Windows.zip
