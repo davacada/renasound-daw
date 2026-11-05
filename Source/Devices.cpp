@@ -1192,7 +1192,7 @@ public:
             std::vector<float> tops, bottoms;
             for (int x = 0; x < cols; ++x)
             {
-                const size_t s0 = (size_t) x * preview.size() / (size_t) cols, s1 = juce::jmax (s0 + 1, (size_t) (x + 1) * preview.size() / (size_t) cols);
+                const size_t s0 = (size_t) x * preview.size() / (size_t) cols, s1 = std::max (s0 + 1, (size_t) (x + 1) * preview.size() / (size_t) cols);
                 float lo = 0, hi = 0;
                 for (size_t i = s0; i < s1 && i < preview.size(); ++i) { lo = juce::jmin (lo, preview[i]); hi = juce::jmax (hi, preview[i]); }
                 tops.push_back (plot.getCentreY() - hi * plot.getHeight() * 0.48f);

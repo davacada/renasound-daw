@@ -279,9 +279,9 @@ void MainComponent::openDevice (int trackId, FxPtr slot, bool instrument)
     auto* w = deviceWindows.emplace_back (std::make_unique<DeviceWindow> (ctx, trackId, slot, instrument)).get();
     const int cascade = 28 * (int) ((deviceWindows.size() - 1) % 8);   // don't stack windows exactly on top of each other
     w->setTopLeftPosition (w->getX() + cascade, w->getY() + cascade);
-    w->onClose = [this, w]
+    w->onClose = [sp = juce::Component::SafePointer<MainComponent> (this), w]
     {
-        juce::MessageManager::callAsync ([sp = juce::Component::SafePointer<MainComponent> (this), w]
+        juce::MessageManager::callAsync ([sp, w]
         {
             if (sp == nullptr) return;
             auto& v = sp->deviceWindows;
@@ -303,9 +303,9 @@ void MainComponent::openPluginManager()
     if (pluginManager == nullptr)
     {
         pluginManager = std::make_unique<PluginManagerWindow> (ctx);
-        pluginManager->onClose = [this]
+        pluginManager->onClose = [sp = juce::Component::SafePointer<MainComponent> (this)]
         {
-            juce::MessageManager::callAsync ([sp = juce::Component::SafePointer<MainComponent> (this)]
+            juce::MessageManager::callAsync ([sp]
             {
                 if (sp != nullptr) sp->pluginManager.reset();
             });

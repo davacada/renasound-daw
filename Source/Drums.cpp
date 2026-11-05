@@ -68,7 +68,7 @@ namespace
         while (end > 64 && std::abs (x[end - 1]) < 0.0005f) --end;
         x.resize (end);
         // 2 ms fade at the very end
-        const size_t fade = juce::jmin<size_t> (96, x.size());
+        const size_t fade = std::min<size_t> (96, x.size());
         for (size_t i = 0; i < fade; ++i) x[x.size() - 1 - i] *= (float) i / (float) fade;
     }
 
