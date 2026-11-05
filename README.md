@@ -6,6 +6,10 @@ A Mixcraft-style music DAW for **macOS and Windows**, written in C++ with JUCE.
 
 ![RENASOUND](docs/screenshot.png)
 
+## What's new in 0.9.1
+
+- The **Update** button now downloads from the public [renasound-releases](https://github.com/davacada/renasound-releases) repo, so it works while this code stays private. Install 0.9.1 by hand once; after that, Update does it for you.
+
 ## What's new in 0.9
 
 - **New faceplates for the built-in effects**, each with its own look and live graphics:

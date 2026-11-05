@@ -21,7 +21,7 @@ class Updater : private juce::Thread, private juce::AsyncUpdater
 public:
     enum class State { Idle, Checking, UpToDate, Available, Downloading, ReadyToInstall, Failed };
 
-    static constexpr const char* repository = "davacada/renasound-daw";
+    static constexpr const char* repository = "davacada/renasound-releases";   // public: only the installers live there
     static int currentBuild() { return RENASOUND_BUILD_NUMBER; }
 
     Updater();
