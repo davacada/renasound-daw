@@ -274,10 +274,26 @@ void LibraryPanel::paintListBoxItem (int row, juce::Graphics& g, int w, int h, b
     g.drawText (len, w - 60, 0, 50, h, juce::Justification::centredRight);
 }
 
-void LibraryPanel::listBoxItemDoubleClicked (int row, const juce::MouseEvent&)
+// one click plays a sound; so does moving through the list with the arrow keys
+void LibraryPanel::previewRow (int row)
 {
-    if (row >= 0 && row < (int) shown.size())
-        ctx.engine.preview (ctx.project.audioCache.load (allItems[(size_t) shown[(size_t) row]].file));
+    if (row < 0 || row >= (int) shown.size()) return;
+    lastPreviewRow = row;
+    lastPreviewTime = juce::Time::getMillisecondCounter();
+    ctx.engine.preview (ctx.project.audioCache.load (allItems[(size_t) shown[(size_t) row]].file));
+}
+
+void LibraryPanel::selectedRowsChanged (int lastRowSelected)
+{
+    previewRow (lastRowSelected);
+}
+
+void LibraryPanel::listBoxItemClicked (int row, const juce::MouseEvent& e)
+{
+    if (e.mods.isShiftDown() || e.mods.isCommandDown()) return;   // adding to a multi-selection
+    // a click on the row that's already selected plays it again (a new selection already played above)
+    if (row == lastPreviewRow && juce::Time::getMillisecondCounter() - lastPreviewTime < 150) return;
+    previewRow (row);
 }
 
 juce::var LibraryPanel::getDragSourceDescription (const juce::SparseSet<int>& rows)

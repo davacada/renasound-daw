@@ -51,7 +51,11 @@ private:
 
     int getNumRows() override { return (int) shown.size(); }
     void paintListBoxItem (int row, juce::Graphics&, int w, int h, bool selected) override;
-    void listBoxItemDoubleClicked (int row, const juce::MouseEvent&) override;
+    void listBoxItemClicked (int row, const juce::MouseEvent&) override;
+    void selectedRowsChanged (int lastRowSelected) override;
+    void previewRow (int row);
+    int lastPreviewRow = -1;
+    juce::uint32 lastPreviewTime = 0;
     juce::var getDragSourceDescription (const juce::SparseSet<int>& rows) override;
     void deleteKeyPressed (int) override {}
 };
