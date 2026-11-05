@@ -1,8 +1,44 @@
 #include "LibraryPanel.h"
+#include "AbletonLibrary.h"
 #include "../Drums.h"
 
 namespace rs
 {
+
+// walks the library folders off the message thread (an Ableton library can hold tens of thousands of sounds)
+class LibraryPanel::Scanner : public juce::Thread
+{
+public:
+    Scanner (std::vector<Source> s, juce::String wc, juce::Component::SafePointer<LibraryPanel> p)
+        : juce::Thread ("RENASOUND library scan"), sources (std::move (s)), wildcard (std::move (wc)), panel (p) {}
+    ~Scanner() override { stopThread (4000); }
+
+    std::atomic<int> found { 0 };
+
+    void run() override
+    {
+        std::vector<Item> items;
+        for (int i = 0; i < (int) sources.size() && ! threadShouldExit(); ++i)
+            for (const auto& entry : juce::RangedDirectoryIterator (sources[(size_t) i].dir, true, wildcard, juce::File::findFiles))
+            {
+                if (threadShouldExit()) return;
+                Item it;
+                it.file = entry.getFile();
+                it.name = it.file.getFileNameWithoutExtension();
+                it.folder = i == 0 ? juce::String ("Recording") : it.file.getParentDirectory().getFileName().trim();
+                it.source = i;
+                items.push_back (std::move (it));
+                found = (int) items.size();
+            }
+        auto p = panel;
+        juce::MessageManager::callAsync ([p, items = std::move (items)] () mutable { if (p != nullptr) p->scanFinished (std::move (items)); });
+    }
+
+private:
+    std::vector<Source> sources;
+    juce::String wildcard;
+    juce::Component::SafePointer<LibraryPanel> panel;
+};
 
 LibraryPanel::LibraryPanel (AppContext& c) : ctx (c)
 {
@@ -61,7 +97,7 @@ LibraryPanel::LibraryPanel (AppContext& c) : ctx (c)
     refresh();
 }
 
-LibraryPanel::~LibraryPanel() = default;
+LibraryPanel::~LibraryPanel() { scanner.reset(); }
 
 void LibraryPanel::saveFolders()
 {
@@ -74,50 +110,71 @@ void LibraryPanel::saveFolders()
 
 void LibraryPanel::refresh()
 {
-    allItems.clear();
-    auto& formats = ctx.project.audioCache.formats;
-    const auto wildcard = formats.getWildcardForAllFormats();
-
-    for (auto& folder : folders)
+    if (scanner != nullptr && scanner->isThreadRunning()) return;   // already looking
+    sources.clear();
+    for (int i = 0; i < folders.size(); ++i) sources.push_back ({ folders[i], i == 0 ? juce::String ("My recordings") : folders[i].getFileName().trim(), false });
+    for (auto& a : ableton::findLibraries())
     {
-        for (const auto& entry : juce::RangedDirectoryIterator (folder, true, wildcard, juce::File::findFiles))
-        {
-            Item it;
-            it.file = entry.getFile();
-            it.name = it.file.getFileNameWithoutExtension();
-            // show the sound's own folder ("Congas") rather than the top one
-            it.folder = folder == folders[0] ? juce::String ("Recording") : it.file.getParentDirectory().getFileName().trim();
-            if (std::unique_ptr<juce::AudioFormatReader> r { formats.createReaderFor (it.file) }; r != nullptr && r->sampleRate > 0)
-                it.seconds = (double) r->lengthInSamples / r->sampleRate;
-            allItems.push_back (it);
-        }
+        bool dup = false;
+        for (auto& s : sources) dup = dup || s.dir == a.folder;
+        if (! dup) sources.push_back ({ a.folder, a.label, true });
     }
+    scanner = std::make_unique<Scanner> (sources, ctx.project.audioCache.formats.getWildcardForAllFormats(), juce::Component::SafePointer<LibraryPanel> (this));
+    scanner->startThread (juce::Thread::Priority::low);
+    startTimerHz (4);
+    timerCallback();
+}
+
+void LibraryPanel::timerCallback()
+{
+    if (scanner == nullptr || ! scanner->isThreadRunning()) { stopTimer(); return; }
+    status = "Looking for sounds...  " + juce::String (scanner->found.load()) + " so far";
+    repaint();
+}
+
+void LibraryPanel::scanFinished (std::vector<Item> items)
+{
+    allItems = std::move (items);
+    stopTimer();
+
     // newest recordings first, then sounds by folder and name
-    const auto rec = folders[0];
-    std::stable_sort (allItems.begin(), allItems.end(), [&rec] (const Item& a, const Item& b)
+    std::stable_sort (allItems.begin(), allItems.end(), [] (const Item& a, const Item& b)
     {
-        const bool ra = a.file.isAChildOf (rec), rb = b.file.isAChildOf (rec);
-        if (ra != rb) return ra;
-        if (ra) return a.file.getLastModificationTime() > b.file.getLastModificationTime();
+        if ((a.source == 0) != (b.source == 0)) return a.source == 0;
+        if (a.source == 0) return a.file.getLastModificationTime() > b.file.getLastModificationTime();
+        if (a.source != b.source) return a.source < b.source;
         if (a.folder != b.folder) return a.folder.compareNatural (b.folder) < 0;
         return a.name.compareNatural (b.name) < 0;
     });
 
-    // folder menu: every library folder, and under each one the subfolders that hold sounds
+    // the folder menu: your folders (with the subfolders that hold sounds), then Ableton's libraries
+    // (with their packs / top folders)
     const auto previous = folderBox.getText();
     folderBox.clear (juce::dontSendNotification);
     filterDirs.clear();
     folderBox.addItem ("All sounds", 1);
-    for (int i = 0; i < folders.size(); ++i)
+    struct ByName { static int compareElements (const juce::File& a, const juce::File& b) { return a.getFileName().compareNatural (b.getFileName()); } } cmp;
+    bool abletonHeading = false;
+    int abletonSounds = 0;
+    juce::StringArray abletonFound;
+    for (int i = 0; i < (int) sources.size(); ++i)
     {
-        filterDirs.add (folders[i]);
-        folderBox.addItem (i == 0 ? juce::String ("My recordings") : folders[i].getFileName().trim(), filterDirs.size() + 1);
+        const auto& src = sources[(size_t) i];
+        if (src.ableton && ! abletonHeading) { folderBox.addSectionHeading ("ABLETON LIVE"); abletonHeading = true; }
+        filterDirs.add (src.dir);
+        folderBox.addItem (src.label, filterDirs.size() + 1);
         if (i == 0) continue;
         juce::Array<juce::File> subs;
         for (auto& it : allItems)
-            if (it.file.isAChildOf (folders[i]) && it.file.getParentDirectory() != folders[i])
-                subs.addIfNotAlreadyThere (it.file.getParentDirectory());
-        struct ByName { static int compareElements (const juce::File& a, const juce::File& b) { return a.getFileName().compareNatural (b.getFileName()); } } cmp;
+        {
+            if (it.source != i) continue;
+            if (src.ableton) ++abletonSounds;
+            auto d = it.file.getParentDirectory();
+            if (d == src.dir) continue;
+            if (src.ableton) while (d.getParentDirectory() != src.dir) d = d.getParentDirectory();   // just the packs / top folders
+            subs.addIfNotAlreadyThere (d);
+        }
+        if (src.ableton) abletonFound.addIfNotAlreadyThere (src.label.fromFirstOccurrenceOf ("Ableton ", false, false));
         subs.sort (cmp);
         for (auto& d : subs)
         {
@@ -129,6 +186,10 @@ void LibraryPanel::refresh()
     for (int i = 0; i < folderBox.getNumItems(); ++i)
         if (folderBox.getItemText (i) == previous) folderBox.setSelectedItemIndex (i, juce::dontSendNotification);
 
+    status = juce::String ((int) allItems.size()) + " sounds";
+    if (! abletonFound.isEmpty())
+        status << juce::String::fromUTF8 ("   \xc2\xb7   from Ableton Live: ") << abletonFound.joinIntoString (", ")
+               << " (" << abletonSounds << " sounds, used where they are)";
     applyFilter();
 }
 
@@ -137,11 +198,12 @@ void LibraryPanel::applyFilter()
     shown.clear();
     const auto q = search.getText().trim();
     const int folderIndex = folderBox.getSelectedId() - 2;
-    for (auto& it : allItems)
+    for (int i = 0; i < (int) allItems.size(); ++i)
     {
-        if (q.isNotEmpty() && ! it.name.containsIgnoreCase (q)) continue;
+        const auto& it = allItems[(size_t) i];
+        if (q.isNotEmpty() && ! it.name.containsIgnoreCase (q) && ! it.folder.containsIgnoreCase (q)) continue;
         if (folderIndex >= 0 && folderIndex < filterDirs.size() && ! it.file.isAChildOf (filterDirs[folderIndex])) continue;
-        shown.push_back (it);
+        shown.push_back (i);
     }
     list.updateContent();
     list.setVisible (! shown.empty());
@@ -158,19 +220,24 @@ void LibraryPanel::resized()
     addFolder.setBounds (top.removeFromRight (110));  top.removeFromRight (6);
     folderBox.setBounds (top.removeFromRight (150));  top.removeFromRight (6);
     search.setBounds (top);
-    r.removeFromTop (6);
+    r.removeFromTop (4);
+    statusArea = r.removeFromTop (18);
+    r.removeFromTop (2);
     list.setBounds (r);
 }
 
 void LibraryPanel::paint (juce::Graphics& g)
 {
     g.fillAll (theme::panel);
+    g.setColour (theme::textDim);
+    g.setFont (theme::font (11.5f, true));
+    g.drawText (status, statusArea.reduced (4, 0), juce::Justification::centredLeft, true);
     if (shown.empty())
     {
-        g.setColour (theme::textDim);
         g.setFont (theme::font (14.0f));
-        g.drawText (allItems.empty() ? "Nothing here yet. Arm a track and hit record: every take is saved to your library."
-                                     : "No sounds match your search.",
+        g.drawText (scanner != nullptr && scanner->isThreadRunning() ? "Looking for sounds..."
+                    : allItems.empty() ? "Nothing here yet. Arm a track and hit record: every take is saved to your library."
+                                       : "No sounds match your search.",
                     list.getBounds(), juce::Justification::centred);
     }
 }
@@ -178,7 +245,13 @@ void LibraryPanel::paint (juce::Graphics& g)
 void LibraryPanel::paintListBoxItem (int row, juce::Graphics& g, int w, int h, bool selected)
 {
     if (row < 0 || row >= (int) shown.size()) return;
-    auto& it = shown[(size_t) row];
+    auto& it = allItems[(size_t) shown[(size_t) row]];
+    if (it.seconds < 0)   // the length is read when the row first shows (scanning thousands of files up front would be slow)
+    {
+        it.seconds = 0;
+        if (std::unique_ptr<juce::AudioFormatReader> r { ctx.project.audioCache.formats.createReaderFor (it.file) }; r != nullptr && r->sampleRate > 0)
+            it.seconds = (double) r->lengthInSamples / r->sampleRate;
+    }
     if (selected) { g.setColour (theme::accent.withAlpha (0.25f)); g.fillRoundedRectangle (2, 1, (float) w - 4, (float) h - 2, 4); }
 
     g.setColour (theme::accent2);
@@ -204,7 +277,7 @@ void LibraryPanel::paintListBoxItem (int row, juce::Graphics& g, int w, int h, b
 void LibraryPanel::listBoxItemDoubleClicked (int row, const juce::MouseEvent&)
 {
     if (row >= 0 && row < (int) shown.size())
-        ctx.engine.preview (ctx.project.audioCache.load (shown[(size_t) row].file));
+        ctx.engine.preview (ctx.project.audioCache.load (allItems[(size_t) shown[(size_t) row]].file));
 }
 
 juce::var LibraryPanel::getDragSourceDescription (const juce::SparseSet<int>& rows)
@@ -212,7 +285,7 @@ juce::var LibraryPanel::getDragSourceDescription (const juce::SparseSet<int>& ro
     juce::StringArray paths;
     for (int i = 0; i < rows.size(); ++i)
         if (rows[i] >= 0 && rows[i] < (int) shown.size())
-            paths.add (shown[(size_t) rows[i]].file.getFullPathName());
+            paths.add (allItems[(size_t) shown[(size_t) rows[i]]].file.getFullPathName());
     return paths.joinIntoString ("\n");
 }
 

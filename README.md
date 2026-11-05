@@ -6,6 +6,11 @@ A Mixcraft-style music DAW for **macOS and Windows**, written in C++ with JUCE.
 
 ![RENASOUND](docs/screenshot.png)
 
+## What's new in 0.12
+
+- **Your Ableton Live sounds in the Library:** RENASOUND finds an installed Live's Core Library, Packs and User Library (also where Live's settings say they've been moved) and lists their samples under ABLETON LIVE, with a menu entry per pack. Nothing is copied: the sounds are used where they are, through your own Live licence.
+- The Library scans in the background, so big sample collections don't freeze the app, and search also matches folder names.
+
 ## What's new in 0.11.1
 
 - An instrument or effect always opens in its one window, which stays above RENASOUND (but not above other apps).
