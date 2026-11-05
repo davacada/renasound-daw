@@ -15,6 +15,27 @@ MainComponent::MainComponent()
     typingButton.onClick = [this] { typing.setEnabled (! typing.isEnabled()); };
     typingButton.setTooltip ("Musical typing: play the instrument with your computer keyboard.\n"
                              "A S D F G H J K L = white keys, W E T Y U O P = black keys, Z / X = octave, C / V = velocity");
+    addAndMakeVisible (snapButton);
+    addAndMakeVisible (gridBox);
+    snapButton.setClickingTogglesState (true);
+    snapButton.setToggleState (true, juce::dontSendNotification);
+    snapButton.getProperties().set ("compact", true);
+    snapButton.setTooltip ("Snap to grid: clips, the playhead and the loop land on the grid. Hold Alt while dragging to place freely");
+    snapButton.onClick = [this] { ctx.snapOn = snapButton.getToggleState(); gridBox.setEnabled (ctx.snapOn); };
+    {
+        const std::pair<const char*, double> grids[] { { "Auto", 0.0 }, { "1 bar", -1.0 }, { "1/2", 2.0 }, { "1/4", 1.0 }, { "1/8", 0.5 }, { "1/16", 0.25 }, { "1/32", 0.125 } };
+        int id = 1;
+        for (auto& [name, beats] : grids) gridBox.addItem (name, id++);
+        gridBox.setSelectedId (1, juce::dontSendNotification);
+        gridBox.setTooltip ("Grid size (Auto follows the zoom)");
+        gridBox.onChange = [this]
+        {
+            const double values[] { 0.0, -1.0, 2.0, 1.0, 0.5, 0.25, 0.125 };
+            const double v = values[juce::jlimit (0, 6, gridBox.getSelectedId() - 1)];
+            ctx.gridBeats = v < 0 ? (double) project.beatsPerBar : v;
+            timeline.repaint();
+        };
+    }
     typing.onChange = [this]
     {
         typingButton.setToggleState (typing.isEnabled(), juce::dontSendNotification);
@@ -339,6 +360,10 @@ void MainComponent::resized()
     bpm.setBounds (bar.removeFromLeft (110));
     bar.removeFromLeft (8);
     typingButton.setBounds (bar.removeFromLeft (40));
+    bar.removeFromLeft (8);
+    snapButton.setBounds (bar.removeFromLeft (52).reduced (0, 4));
+    bar.removeFromLeft (2);
+    gridBox.setBounds (bar.removeFromLeft (76).reduced (0, 4));
 
     updateButton.setBounds (bar.removeFromRight (128));   bar.removeFromRight (4);
     settingsButton.setBounds (bar.removeFromRight (104)); bar.removeFromRight (6);
@@ -357,6 +382,20 @@ void MainComponent::resized()
 
 void MainComponent::timerCallback()
 {
+    engine.updateClipPlayback();
+
+    // instrument tracks take the name of the instrument chosen for them (until renamed by hand)
+    bool renamed = false;
+    for (auto& t : project.tracks)
+        if (t->autoName && t->type == Track::Type::Instrument)
+            if (const auto n = AppContext::instrumentName (*t); n.isNotEmpty() && n != t->name)
+            {
+                const juce::ScopedLock sl (project.lock);
+                t->name = n;
+                renamed = true;
+            }
+    if (renamed) project.changed();
+
     // time display: bar.beat and minutes:seconds
     const double beats = engine.getPositionBeats();
     const int bar = (int) (beats / project.beatsPerBar) + 1;
@@ -507,6 +546,7 @@ void MainComponent::renameTrack (int trackId)
                 {
                     const juce::ScopedLock sl (project.lock);
                     tr->name = newName;
+                    tr->autoName = false;   // a name the user chose stays
                 }
                 project.changed();
             }
@@ -757,7 +797,8 @@ void MainComponent::getAllCommands (juce::Array<juce::CommandID>& c)
                   cmdUndo, cmdRedo, cmdDeleteClip, cmdDuplicateClip, cmdSplitClip,
                   cmdPlayPause, cmdRecord, cmdToStart, cmdToggleLoop, cmdToggleMetronome,
                   cmdAddAudioTrack, cmdAddInstrumentTrack, cmdAudioSettings, cmdZoomIn, cmdZoomOut,
-                  cmdShowEditor, cmdShowMixer, cmdShowLibrary, cmdPluginManager, cmdTrackEffects, cmdMasterEffects, cmdImportMixcraft });
+                  cmdShowEditor, cmdShowMixer, cmdShowLibrary, cmdPluginManager, cmdTrackEffects, cmdMasterEffects, cmdImportMixcraft,
+                  cmdCut, cmdCopy, cmdPaste, cmdSelectAll, cmdJoin, cmdReverse, cmdLock, cmdNudgeLeft, cmdNudgeRight, cmdDeselect });
 }
 
 void MainComponent::getCommandInfo (juce::CommandID id, juce::ApplicationCommandInfo& info)
@@ -778,6 +819,16 @@ void MainComponent::getCommandInfo (juce::CommandID id, juce::ApplicationCommand
 
         case cmdUndo:     info.setInfo ("Undo", "", "Edit", 0); info.setActive (project.canUndo()); info.addDefaultKeypress ('z', cmd); break;
         case cmdRedo:     info.setInfo ("Redo", "", "Edit", 0); info.setActive (project.canRedo()); info.addDefaultKeypress ('z', cmd | shift); break;
+        case cmdCut:       info.setInfo ("Cut", "", "Edit", 0);        info.addDefaultKeypress ('x', cmd); info.setActive (timeline.hasClipSelection()); break;
+        case cmdCopy:      info.setInfo ("Copy", "", "Edit", 0);       info.addDefaultKeypress ('c', cmd); info.setActive (timeline.hasClipSelection()); break;
+        case cmdPaste:     info.setInfo ("Paste at playhead", "", "Edit", 0); info.addDefaultKeypress ('v', cmd); info.setActive (! ctx.clipboard.empty()); break;
+        case cmdSelectAll: info.setInfo ("Select all clips", "", "Edit", 0); info.addDefaultKeypress ('a', cmd); break;
+        case cmdJoin:      info.setInfo ("Join clips into one", "", "Edit", 0); info.addDefaultKeypress ('j', cmd); info.setActive (ctx.getSelectedClips().size() > 1); break;
+        case cmdReverse:   info.setInfo ("Reverse clip", "", "Edit", 0); info.addDefaultKeypress ('r', cmd); info.setActive (timeline.hasClipSelection()); break;
+        case cmdLock:      info.setInfo ("Lock / unlock clip", "", "Edit", 0); info.addDefaultKeypress ('l', cmd); info.setActive (timeline.hasClipSelection()); break;
+        case cmdNudgeLeft:  info.setInfo ("Nudge clips left", "", "Edit", 0);  info.addDefaultKeypress (KP::leftKey, 0); break;
+        case cmdNudgeRight: info.setInfo ("Nudge clips right", "", "Edit", 0); info.addDefaultKeypress (KP::rightKey, 0); break;
+        case cmdDeselect:  info.setInfo ("Deselect", "", "Edit", 0); info.addDefaultKeypress (KP::escapeKey, 0); break;
         case cmdDeleteClip:
             info.setInfo ("Delete clip", "", "Edit", 0);
             info.addDefaultKeypress (KP::deleteKey, 0);
@@ -836,15 +887,19 @@ bool MainComponent::perform (const InvocationInfo& info)
 
         case cmdUndo: engine.stop(); project.undo(); break;
         case cmdRedo: engine.stop(); project.redo(); break;
-        case cmdDeleteClip:
-            if (ctx.selectedClipId >= 0) { project.beginEdit(); project.removeClip (ctx.selectedClipId); ctx.selectedClipId = -1; }
-            break;
-        case cmdDuplicateClip:
-            if (ctx.selectedClipId >= 0) { project.beginEdit(); if (auto c = project.duplicateClip (ctx.selectedClipId)) ctx.selectClip (c->id); }
-            break;
-        case cmdSplitClip:
-            if (ctx.selectedClipId >= 0) { project.beginEdit(); project.splitClip (ctx.selectedClipId, engine.getPositionBeats()); }
-            break;
+        case cmdDeleteClip:    timeline.deleteSelection(); break;
+        case cmdDuplicateClip: timeline.duplicateSelection(); break;
+        case cmdSplitClip:     timeline.splitSelection (engine.getPositionBeats()); break;
+        case cmdCut:           timeline.cutSelection(); break;
+        case cmdCopy:          timeline.copySelection(); break;
+        case cmdPaste:         timeline.pasteAt (engine.getPositionBeats()); break;
+        case cmdSelectAll:     timeline.selectAll(); break;
+        case cmdJoin:          timeline.joinSelection(); break;
+        case cmdReverse:       timeline.reverseSelection(); break;
+        case cmdLock:          timeline.toggleLockSelection(); break;
+        case cmdNudgeLeft:     timeline.nudgeSelection (-1); break;
+        case cmdNudgeRight:    timeline.nudgeSelection (1); break;
+        case cmdDeselect:      ctx.clearClipSelection(); ctx.rangeStart = ctx.rangeEnd = -1; break;
         case cmdAddAudioTrack:      addTrack (Track::Type::Audio); break;
         case cmdAddInstrumentTrack: addTrack (Track::Type::Instrument); break;
 
@@ -853,6 +908,12 @@ bool MainComponent::perform (const InvocationInfo& info)
         case cmdToStart:   engine.setPositionBeats (0); break;
         case cmdToggleLoop:
         {
+            // a highlighted area that isn't the loop yet: loop it
+            if (ctx.hasRange() && ! (project.loopEnabled && std::abs (project.loopStart - ctx.rangeStart) < 1.0e-6 && std::abs (project.loopEnd - ctx.rangeEnd) < 1.0e-6))
+            {
+                timeline.loopSelection();
+                break;
+            }
             const juce::ScopedLock sl (project.lock);
             project.loopEnabled = ! project.loopEnabled;
             if (project.loopEnd <= project.loopStart) { project.loopStart = 0; project.loopEnd = project.beatsPerBar * 4; }
@@ -932,7 +993,11 @@ juce::PopupMenu MainComponent::getMenuForIndex (int index, const juce::String&)
         case 1:
             m.addCommandItem (cm, cmdUndo); m.addCommandItem (cm, cmdRedo);
             m.addSeparator();
-            m.addCommandItem (cm, cmdSplitClip); m.addCommandItem (cm, cmdDuplicateClip); m.addCommandItem (cm, cmdDeleteClip);
+            m.addCommandItem (cm, cmdCut); m.addCommandItem (cm, cmdCopy); m.addCommandItem (cm, cmdPaste);
+            m.addCommandItem (cm, cmdSelectAll);
+            m.addSeparator();
+            m.addCommandItem (cm, cmdSplitClip); m.addCommandItem (cm, cmdDuplicateClip); m.addCommandItem (cm, cmdJoin);
+            m.addCommandItem (cm, cmdReverse); m.addCommandItem (cm, cmdLock); m.addCommandItem (cm, cmdDeleteClip);
             m.addSeparator();
             m.addCommandItem (cm, cmdAddAudioTrack); m.addCommandItem (cm, cmdAddInstrumentTrack);
             m.addSeparator();

@@ -19,7 +19,8 @@ enum CommandIDs
     cmdUndo, cmdRedo, cmdDeleteClip, cmdDuplicateClip, cmdSplitClip,
     cmdPlayPause, cmdRecord, cmdToStart, cmdToggleLoop, cmdToggleMetronome,
     cmdAddAudioTrack, cmdAddInstrumentTrack, cmdAudioSettings, cmdZoomIn, cmdZoomOut,
-    cmdShowEditor, cmdShowMixer, cmdShowLibrary, cmdPluginManager, cmdTrackEffects, cmdMasterEffects, cmdImportMixcraft
+    cmdShowEditor, cmdShowMixer, cmdShowLibrary, cmdPluginManager, cmdTrackEffects, cmdMasterEffects, cmdImportMixcraft,
+    cmdCut, cmdCopy, cmdPaste, cmdSelectAll, cmdJoin, cmdReverse, cmdLock, cmdNudgeLeft, cmdNudgeRight, cmdDeselect
 };
 
 class MainComponent : public juce::Component,
@@ -74,6 +75,8 @@ private:
                clickButton { "Metronome", IconButton::Icon::Metronome },
                typingButton { "Musical typing", IconButton::Icon::Piano };
     MusicalTyping typing { engine.keyboardState };
+    juce::TextButton snapButton { "Snap" };   // snap to grid, with the grid size next to it
+    juce::ComboBox gridBox;
     juce::Label timeDisplay, bpmLabel;
     juce::Slider bpm;
     juce::TextButton mixdown { "Mix down" }, settingsButton { "Audio setup" }, updateButton { "Update" };

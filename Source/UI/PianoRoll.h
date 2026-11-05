@@ -1,5 +1,6 @@
 #pragma once
 #include "AppContext.h"
+#include "EditorRuler.h"
 
 namespace rs
 {
@@ -28,7 +29,7 @@ public:
     double scrollX = 0;
     int scrollY = 0;
     double snap = 0.25;
-    static constexpr int keysWidth = 76, toolbarHeight = 36;
+    static constexpr int keysWidth = 76, toolbarHeight = 36, rulerHeight = 18;
 
     Tool tool = Tool::Select;
     void setTool (Tool);
@@ -45,6 +46,8 @@ private:
     juce::ScrollBar hScroll { false }, vScroll { true };
     juce::ComboBox preset, snapBox;
     juce::TextButton quantize { "Quantize" }, clearNotes { "Clear" };
+    EditorRuler ruler { ctx };
+    IconButton playClip { "Play clip", IconButton::Icon::Play };
 
     // Select / Edit / Draw, each an icon with its name
     struct ToolButton : juce::Button

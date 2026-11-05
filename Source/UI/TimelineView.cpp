@@ -635,13 +635,16 @@ public:
         if (p.loopEnabled)
         {
             const float lx0 = owner.beatToX (p.loopStart), lx1 = owner.beatToX (p.loopEnd);
-            g.setColour (theme::accent2.withAlpha (0.06f));
+            g.setColour (theme::accent2.withAlpha (0.08f));
             g.fillRect (juce::Rectangle<float> (lx0, 0, lx1 - lx0, (float) getHeight()));
+            g.setColour (theme::accent2.withAlpha (0.45f));
+            g.drawVerticalLine ((int) lx0, 0, (float) getHeight());
+            g.drawVerticalLine ((int) lx1, 0, (float) getHeight());
         }
 
         // grid
         const double first = std::floor (owner.xToBeat (0)), last = owner.xToBeat ((float) getWidth()) + 1;
-        const double snap = owner.getSnap();
+        const double snap = owner.getGridStep();
         for (double b = juce::jmax (0.0, first); b <= last; b += juce::jmax (snap, 0.25))
         {
             const float x = owner.beatToX (b);
@@ -676,6 +679,26 @@ public:
             g.drawText ("MASTER  -  volume and master effect automation", 10, y, 400, trackHeight, juce::Justification::centredLeft);
             drawAutomation (g, numTracks);
         }
+
+        // the highlighted area (drag on an empty part of the lanes) and the selection box
+        if (owner.ctx.hasRange())
+        {
+            const float rx0 = owner.beatToX (owner.ctx.rangeStart), rx1 = owner.beatToX (owner.ctx.rangeEnd);
+            g.setColour (theme::accent.withAlpha (0.10f));
+            g.fillRect (juce::Rectangle<float> (rx0, 0, rx1 - rx0, (float) getHeight()));
+            g.setColour (theme::accent.withAlpha (0.5f));
+            g.drawVerticalLine ((int) rx0, 0, (float) getHeight());
+            g.drawVerticalLine ((int) rx1, 0, (float) getHeight());
+        }
+        if (! marquee.isEmpty())
+        {
+            g.setColour (theme::text.withAlpha (0.08f));
+            g.fillRect (marquee);
+            g.setColour (theme::text.withAlpha (0.6f));
+            g.drawRect (marquee, 1.0f);
+        }
+
+        if (owner.ctx.engine.isRecording()) drawRecording (g);
 
         // drop indicator
         if (owner.dropIndicatorBeat >= 0)
@@ -860,21 +883,32 @@ public:
     void drawClip (juce::Graphics& g, const Track& t, const Clip& c, juce::Rectangle<float> r)
     {
         if (r.getRight() < 0 || r.getX() > getWidth()) return;
-        const bool selected = owner.ctx.selectedClipId == c.id;
-        auto body = t.colour.withMultipliedSaturation (0.75f).withMultipliedBrightness (0.55f);
+        const bool selected = owner.ctx.isClipSelected (c.id);
+        auto body = t.colour.withMultipliedSaturation (c.locked ? 0.35f : 0.75f).withMultipliedBrightness (0.55f);
 
         g.setColour (body.withAlpha (0.9f));
         g.fillRoundedRectangle (r, 5.0f);
         auto title = r.removeFromTop (16.0f);
-        g.setColour (t.colour.withAlpha (0.9f));
+        g.setColour ((c.locked ? t.colour.withMultipliedSaturation (0.45f) : t.colour).withAlpha (0.9f));
         g.fillRoundedRectangle (title.withHeight (title.getHeight() + 5), 5.0f);
         g.setColour (body.withAlpha (0.9f));
         g.fillRect (title.withTop (title.getBottom()).withHeight (5.0f));
 
+        auto titleText = title.reduced (6, 0);
+        if (c.locked)
+        {
+            // padlock
+            auto lk = titleText.removeFromRight (12).withSizeKeepingCentre (9, 10);
+            g.setColour (juce::Colours::black.withAlpha (0.8f));
+            g.fillRoundedRectangle (lk.withTrimmedTop (4), 1.5f);
+            juce::Path shackle;
+            shackle.addCentredArc (lk.getCentreX(), lk.getY() + 4, 3.0f, 3.2f, 0, -juce::MathConstants<float>::halfPi, juce::MathConstants<float>::halfPi, true);
+            g.strokePath (shackle, juce::PathStrokeType (1.4f));
+        }
         g.setColour (juce::Colours::black.withAlpha (0.85f));
         g.setFont (theme::font (11.5f, true));
         g.drawText (c.name + (c.pitch.active && c.pitch.hasChanges() ? (c.pitch.bypass ? "  -  pitch (bypassed)" : "  -  pitch edited") : ""),
-                    title.reduced (6, 0).toNearestInt(), juce::Justification::centredLeft, true);
+                    titleText.toNearestInt(), juce::Justification::centredLeft, true);
 
         auto content = r.reduced (2, 3);
         g.saveState();
@@ -903,30 +937,95 @@ public:
                 g.drawVerticalLine (px, mid - hi * half, mid - lo * half + 1);
             }
         }
-        else if (c.type == Clip::Type::Midi && ! c.notes.empty())
-        {
-            int lo = 127, hi = 0;
-            for (auto& n : c.notes) { lo = juce::jmin (lo, n.pitch); hi = juce::jmax (hi, n.pitch); }
-            lo -= 2; hi += 2;
-            const float nh = juce::jmin (6.0f, content.getHeight() / (float) (hi - lo + 1));
-            g.setColour (t.colour.brighter (0.5f));
-            for (auto& n : c.notes)
-            {
-                if (n.start >= c.lengthBeats) continue;
-                const float x = content.getX() + (float) (n.start * owner.pixelsPerBeat);
-                const float w = (float) (juce::jmin (n.length, c.lengthBeats - n.start) * owner.pixelsPerBeat);
-                const float y = content.getBottom() - (float) (n.pitch - lo + 1) / (float) (hi - lo + 1) * content.getHeight();
-                g.fillRect (x, y, juce::jmax (1.5f, w - 1), juce::jmax (1.5f, nh - 1));
-            }
-        }
+        else if (c.type == Clip::Type::Midi)
+            drawNotes (g, c.notes, c.lengthBeats, content, t.colour.brighter (0.5f));
         g.restoreState();
 
         auto full = r.withTop (title.getY());
         g.setColour (selected ? juce::Colours::white : juce::Colours::black.withAlpha (0.4f));
         g.drawRoundedRectangle (full.reduced (0.5f), 5.0f, selected ? 2.0f : 1.0f);
+        if (selected && ! c.locked)
+        {
+            // trim handles on both sides
+            g.setColour (juce::Colours::white.withAlpha (0.75f));
+            g.fillRoundedRectangle (full.getX() + 2, full.getCentreY() - 9, 3, 18, 1.5f);
+            g.fillRoundedRectangle (full.getRight() - 5, full.getCentreY() - 9, 3, 18, 1.5f);
+        }
     }
 
-    struct Hit { TrackPtr track; ClipPtr clip; int trackIndex = -1; bool onRightEdge = false; };
+    void drawNotes (juce::Graphics& g, const std::vector<MidiNote>& notes, double lengthBeats, juce::Rectangle<float> content, juce::Colour col)
+    {
+        if (notes.empty()) return;
+        int lo = 127, hi = 0;
+        for (auto& n : notes) { lo = juce::jmin (lo, n.pitch); hi = juce::jmax (hi, n.pitch); }
+        lo -= 2; hi += 2;
+        const float nh = juce::jmin (6.0f, content.getHeight() / (float) (hi - lo + 1));
+        g.setColour (col);
+        for (auto& n : notes)
+        {
+            if (n.start >= lengthBeats || n.start < 0) continue;
+            const float x = content.getX() + (float) (n.start * owner.pixelsPerBeat);
+            const float w = (float) (juce::jmin (n.length, lengthBeats - n.start) * owner.pixelsPerBeat);
+            const float y = content.getBottom() - (float) (n.pitch - lo + 1) / (float) (hi - lo + 1) * content.getHeight();
+            g.fillRect (x, y, juce::jmax (1.5f, w - 1), juce::jmax (1.5f, nh - 1));
+        }
+    }
+
+    // what's being recorded, drawn as it forms
+    void drawRecording (juce::Graphics& g)
+    {
+        AudioEngine::RecordingPreview rec;
+        if (! owner.ctx.engine.getRecordingPreview (rec)) return;
+        auto& p = owner.ctx.project;
+        auto rowOf = [&] (int trackId) { for (int i = 0; i < (int) p.tracks.size(); ++i) if (p.tracks[(size_t) i]->id == trackId) return i; return -1; };
+        auto box = [&] (int row, double b0, double b1)
+        {
+            return juce::Rectangle<float> (owner.beatToX (b0), (float) (owner.trackTop (row) - owner.scrollY + 3),
+                                           juce::jmax (4.0f, owner.beatToX (b1) - owner.beatToX (b0)), (float) trackHeight - 7);
+        };
+        auto frame = [&] (juce::Rectangle<float> r, const juce::String& label)
+        {
+            g.setColour (theme::record.withAlpha (0.22f));
+            g.fillRoundedRectangle (r, 5.0f);
+            g.setColour (theme::record.withAlpha (0.9f));
+            g.drawRoundedRectangle (r.reduced (0.5f), 5.0f, 1.5f);
+            g.setFont (theme::font (11.0f, true));
+            g.drawText (label, r.withHeight (16).reduced (6, 0).toNearestInt(), juce::Justification::centredLeft, true);
+        };
+
+        if (const int row = rowOf (rec.instrumentTrackId); row >= 0)
+        {
+            const double bar = std::floor (rec.startBeat / p.beatsPerBar) * p.beatsPerBar;
+            auto r = box (row, bar, juce::jmax (rec.nowBeat, bar + 0.25));
+            frame (r, "Recording...");
+            std::vector<MidiNote> rel = rec.notes;
+            for (auto& n : rel) n.start -= bar;
+            drawNotes (g, rel, rec.nowBeat - bar + 1.0, r.withTrimmedTop (16).reduced (2, 3), theme::text);
+        }
+        for (auto& a : rec.audio)
+        {
+            const int row = rowOf (a.trackId);
+            if (row < 0) continue;
+            auto r = box (row, rec.startBeat, juce::jmax (rec.nowBeat, rec.startBeat + 0.05));
+            frame (r, "Recording...");
+            auto content = r.withTrimmedTop (16).reduced (2, 3);
+            const float mid = content.getCentreY(), half = content.getHeight() * 0.5f;
+            g.setColour (theme::text.withAlpha (0.85f));
+            const int n = (int) a.peaks.size();
+            for (int px = 0; px < (int) content.getWidth() && n > 0; ++px)
+            {
+                const int k0 = px * n / juce::jmax (1, (int) content.getWidth());
+                const int k1 = juce::jmax (k0 + 1, (px + 1) * n / juce::jmax (1, (int) content.getWidth()));
+                float pk = 0;
+                for (int k = k0; k < k1 && k < n; ++k) pk = juce::jmax (pk, a.peaks[(size_t) k]);
+                pk = juce::jmin (1.0f, pk);
+                g.drawVerticalLine ((int) content.getX() + px, mid - pk * half, mid + pk * half + 1);
+            }
+        }
+    }
+
+    enum class Edge { None, Left, Right };
+    struct Hit { TrackPtr track; ClipPtr clip; int trackIndex = -1; Edge edge = Edge::None; };
 
     Hit hitTestClip (juce::Point<int> pos) const
     {
@@ -943,7 +1042,8 @@ public:
             if (b.contains (pos.toFloat()))
             {
                 h.clip = c;
-                h.onRightEdge = pos.x > b.getRight() - 7;
+                const float grip = juce::jmin (8.0f, b.getWidth() / 4.0f);
+                h.edge = pos.x > b.getRight() - grip ? Edge::Right : pos.x < b.getX() + grip ? Edge::Left : Edge::None;
                 return h;
             }
         }
@@ -953,42 +1053,79 @@ public:
     void mouseMove (const juce::MouseEvent& e) override
     {
         auto h = hitTestClip (e.getPosition());
-        setMouseCursor (h.clip != nullptr ? (h.onRightEdge ? juce::MouseCursor::LeftRightResizeCursor : juce::MouseCursor::DraggingHandCursor)
-                                          : juce::MouseCursor::NormalCursor);
+        if (h.clip == nullptr)          setMouseCursor (juce::MouseCursor::NormalCursor);
+        else if (h.clip->locked)        setMouseCursor (juce::MouseCursor::NormalCursor);
+        else if (h.edge != Edge::None)  setMouseCursor (juce::MouseCursor::LeftRightResizeCursor);
+        else                            setMouseCursor (juce::MouseCursor::DraggingHandCursor);
     }
 
     void mouseDown (const juce::MouseEvent& e) override
     {
         dragLaneTrack = dragLane = dragPoint = -1;
-        if (automationMouseDown (e)) return;
-        auto& ctx = owner.ctx;
-        auto h = hitTestClip (e.getPosition());
+        mode = Mode::None;
         dragging = false;
-        dragClip = nullptr;
+        selectOnlyOnUp = false;
+        origs.clear();
+        if (automationMouseDown (e)) return;
+        grabKeyboardFocus();
+
+        auto& ctx = owner.ctx;
+        auto& p = ctx.project;
+        auto h = hitTestClip (e.getPosition());
+        downBeat = owner.xToBeat ((float) e.x);
+        downRow = h.trackIndex;
 
         if (h.clip != nullptr)
         {
-            ctx.selectClip (h.clip->id);
-            dragClip = h.clip;
-            dragMode = h.onRightEdge ? Mode::Resize : Mode::Move;
-            origStart = h.clip->startBeat;
-            origLengthBeats = h.clip->lengthBeats;
-            origLengthSeconds = h.clip->lengthSeconds;
-            origTrack = h.track;
-            mouseDownBeat = owner.xToBeat ((float) e.x);
+            if (e.mods.isPopupMenu())
+            {
+                if (! ctx.isClipSelected (h.clip->id)) ctx.selectClip (h.clip->id);
+                owner.repaint();
+                showClipMenu (h.clip, downBeat);
+                return;
+            }
+            if (e.mods.isShiftDown() || e.mods.isCommandDown())
+            {
+                ctx.toggleClipSelection (h.clip->id);
+                owner.repaint();
+                return;
+            }
+            if (! ctx.isClipSelected (h.clip->id)) ctx.selectClip (h.clip->id);
+            else { selectOnlyOnUp = true; ctx.selectedClipId = h.clip->id; if (ctx.onSelectionChanged) ctx.onSelectionChanged(); }
 
-            if (e.mods.isPopupMenu()) showClipMenu (h.clip);
+            anchor = h.clip;
+            if (h.clip->locked) { owner.repaint(); return; }
+            mode = h.edge == Edge::Left ? Mode::TrimLeft : h.edge == Edge::Right ? Mode::TrimRight : Mode::Move;
+
+            auto remember = [&] (ClipPtr c)
+            {
+                TrackPtr t;
+                p.findClip (c->id, &t);
+                int index = -1;
+                for (int i = 0; i < (int) p.tracks.size(); ++i) if (p.tracks[(size_t) i] == t) index = i;
+                origs.push_back ({ c, c->startBeat, c->offsetSeconds, c->lengthSeconds, c->lengthBeats, c->notes, index });
+            };
+            if (mode == Mode::Move)
+            {
+                for (int id : ctx.getSelectedClips())
+                    if (auto c = p.findClip (id); c != nullptr && ! c->locked) remember (c);
+            }
+            else remember (h.clip);
         }
         else
         {
-            ctx.selectedClipId = -1;
+            if (e.mods.isPopupMenu())
+            {
+                if (h.track != nullptr) { ctx.selectTrack (h.track->id); showLaneMenu (h.track, owner.ctx.snapBeat (downBeat, owner.getSnap())); }
+                return;
+            }
             if (h.track != nullptr) ctx.selectTrack (h.track->id);
-            else if (ctx.onSelectionChanged) ctx.onSelectionChanged();
-
-            if (e.mods.isPopupMenu() && h.track != nullptr)
-                showLaneMenu (h.track, owner.ctx.snapBeat (owner.xToBeat ((float) e.x), owner.getSnap()));
-            else if (! e.mods.isPopupMenu())
-                ctx.engine.setPositionBeats (juce::jmax (0.0, owner.ctx.snapBeat (owner.xToBeat ((float) e.x), owner.getSnap())));
+            marqueeStartSelection = e.mods.isShiftDown() ? ctx.getSelectedClips() : std::vector<int>();
+            if (! e.mods.isShiftDown()) ctx.clearClipSelection();
+            ctx.rangeStart = ctx.rangeEnd = -1;
+            ctx.engine.setPositionBeats (juce::jmax (0.0, owner.ctx.snapBeat (downBeat, owner.getSnap())));
+            mode = Mode::Marquee;
+            marquee = {};
         }
         owner.repaint();
     }
@@ -996,48 +1133,107 @@ public:
     void mouseDrag (const juce::MouseEvent& e) override
     {
         if (dragPoint >= 0) { automationMouseDrag (e); return; }
-        if (dragClip == nullptr || e.mods.isPopupMenu()) return;
+        if (mode == Mode::None || e.mods.isPopupMenu()) return;
         if (! dragging)
         {
             if (e.getDistanceFromDragStart() < 3) return;
             dragging = true;
-            owner.ctx.project.beginEdit();
+            selectOnlyOnUp = false;
+            if (mode != Mode::Marquee) owner.ctx.project.beginEdit();
         }
 
-        auto& p = owner.ctx.project;
+        auto& ctx = owner.ctx;
+        auto& p = ctx.project;
         const double snap = e.mods.isAltDown() ? 0.0 : owner.getSnap();
-        const double delta = owner.xToBeat ((float) e.x) - mouseDownBeat;
+        const double raw = owner.xToBeat ((float) e.x) - downBeat;
+
+        if (mode == Mode::Marquee)
+        {
+            marquee = juce::Rectangle<int> (e.getMouseDownPosition(), e.getPosition()).toFloat();
+            double b0 = owner.xToBeat (marquee.getX()), b1 = owner.xToBeat (marquee.getRight());
+            ctx.rangeStart = juce::jmax (0.0, ctx.snapBeat (b0, snap));
+            ctx.rangeEnd = juce::jmax (ctx.rangeStart, ctx.snapBeat (b1, snap));
+            std::vector<int> ids = marqueeStartSelection;
+            for (int i = 0; i < (int) p.tracks.size(); ++i)
+                for (auto& c : p.tracks[(size_t) i]->clips)
+                    if (getClipBounds (i, *c).intersects (marquee)) ids.push_back (c->id);
+            ctx.setClipSelection (ids);
+            owner.repaint();
+            return;
+        }
 
         const juce::ScopedLock sl (p.lock);
-        if (dragMode == Mode::Move)
+        const double spb = 60.0 / p.bpm;
+        if (mode == Mode::Move)
         {
-            dragClip->startBeat = juce::jmax (0.0, owner.ctx.snapBeat (origStart + delta, snap));
+            const Orig* a = nullptr;
+            for (auto& o : origs) if (o.clip == anchor) a = &o;
+            if (a == nullptr) return;
+            double delta = ctx.snapBeat (a->start + raw, snap) - a->start;
+            for (auto& o : origs) delta = juce::jmax (delta, -o.start);   // nothing before the start of the song
 
-            // move between tracks of the same kind
-            const int ti = owner.trackIndexAtY (e.y);
-            if (ti >= 0 && ti < (int) p.tracks.size())
+            // move between tracks (every clip shifts by the same number of rows, onto tracks of its kind)
+            int rowDelta = 0;
+            if (const int row = owner.trackIndexAtY (e.y); row >= 0 && row < (int) p.tracks.size() && downRow >= 0)
             {
-                auto target = p.tracks[(size_t) ti];
+                rowDelta = row - downRow;
+                for (auto& o : origs)
+                {
+                    const int ti = o.trackIndex + rowDelta;
+                    if (ti < 0 || ti >= (int) p.tracks.size() || o.trackIndex < 0
+                        || p.tracks[(size_t) ti]->type != p.tracks[(size_t) o.trackIndex]->type) { rowDelta = 0; break; }
+                }
+            }
+            for (auto& o : origs)
+            {
+                o.clip->startBeat = o.start + delta;
+                if (o.trackIndex < 0) continue;
+                auto target = p.tracks[(size_t) (o.trackIndex + rowDelta)];
                 TrackPtr current;
-                p.findClip (dragClip->id, &current);
-                if (target != current && current != nullptr && target->type == current->type)
+                p.findClip (o.clip->id, &current);
+                if (current != nullptr && target != current)
                 {
                     auto& v = current->clips;
-                    v.erase (std::remove (v.begin(), v.end(), dragClip), v.end());
-                    target->clips.push_back (dragClip);
-                    owner.ctx.selectedTrackId = target->id;
+                    v.erase (std::remove (v.begin(), v.end(), o.clip), v.end());
+                    target->clips.push_back (o.clip);
+                    if (o.clip == anchor) ctx.selectedTrackId = target->id;
                 }
             }
         }
-        else
+        else if (! origs.empty())
         {
-            const double newEnd = owner.ctx.snapBeat (origStart + (dragClip->type == Clip::Type::Midi ? origLengthBeats : origLengthSeconds * p.bpm / 60.0) + delta, snap);
-            const double minLen = juce::jmax (0.25, snap);
-            const double lenBeats = juce::jmax (minLen, newEnd - dragClip->startBeat);
-            if (dragClip->type == Clip::Type::Midi)
-                dragClip->lengthBeats = lenBeats;
-            else if (dragClip->audio != nullptr)
-                dragClip->lengthSeconds = juce::jmin (lenBeats * 60.0 / p.bpm, dragClip->audio->getLengthSeconds() - dragClip->offsetSeconds);
+            auto& o = origs.front();
+            auto& c = *o.clip;
+            const double origLen = c.type == Clip::Type::Midi ? o.lenBeats : o.lenSec / spb;
+            const double minLen = juce::jmax (0.0625, snap > 0 ? juce::jmin (snap, 0.25) : 0.0625);
+            if (mode == Mode::TrimRight)
+            {
+                const double newEnd = ctx.snapBeat (o.start + origLen + raw, snap);
+                const double lenBeats = juce::jmax (minLen, newEnd - o.start);
+                if (c.type == Clip::Type::Midi) c.lengthBeats = lenBeats;
+                else if (c.audio != nullptr)    c.lengthSeconds = juce::jmin (lenBeats * spb, c.audio->getLengthSeconds() - o.offset);
+            }
+            else   // TrimLeft: the end stays put
+            {
+                const double end = o.start + origLen;
+                double newStart = ctx.snapBeat (o.start + raw, snap);
+                newStart = juce::jmin (newStart, end - minLen);
+                newStart = juce::jmax (newStart, 0.0);
+                if (c.type == Clip::Type::Audio) newStart = juce::jmax (newStart, o.start - o.offset / spb);   // can't go before the file starts
+                const double d = newStart - o.start;
+                c.startBeat = newStart;
+                if (c.type == Clip::Type::Midi)
+                {
+                    c.lengthBeats = o.lenBeats - d;
+                    c.notes = o.notes;
+                    for (auto& n : c.notes) n.start -= d;   // the notes stay where they are in the song
+                }
+                else
+                {
+                    c.offsetSeconds = o.offset + d * spb;
+                    c.lengthSeconds = o.lenSec - d * spb;
+                }
+            }
         }
         owner.repaint();
     }
@@ -1050,9 +1246,15 @@ public:
             owner.ctx.project.changed();
             return;
         }
-        if (dragging) owner.ctx.project.changed();
+        if (dragging && mode != Mode::Marquee) owner.ctx.project.changed();
+        if (! dragging && selectOnlyOnUp && anchor != nullptr) owner.ctx.selectClip (anchor->id);
+        if (mode == Mode::Marquee && ! dragging) owner.ctx.rangeStart = owner.ctx.rangeEnd = -1;
+        marquee = {};
         dragging = false;
-        dragClip = nullptr;
+        mode = Mode::None;
+        origs.clear();
+        anchor = nullptr;
+        owner.repaint();
     }
 
     void mouseDoubleClick (const juce::MouseEvent& e) override
@@ -1090,23 +1292,68 @@ public:
         }
     }
 
-    void showClipMenu (ClipPtr clip)
+    void showClipMenu (ClipPtr clip, double atBeat)
     {
-        auto& p = owner.ctx.project;
+        auto& ctx = owner.ctx;
+        const auto sel = ctx.getSelectedClips();
+        const bool many = sel.size() > 1;
+        bool anyUnlocked = false, allLocked = true, joinable = false;
+        std::map<int, int> perTrack;
+        for (int id : sel)
+        {
+            TrackPtr t;
+            if (auto c = ctx.project.findClip (id, &t))
+            {
+                anyUnlocked = anyUnlocked || ! c->locked;
+                allLocked = allLocked && c->locked;
+                if (t != nullptr && ! c->locked) joinable = joinable || ++perTrack[t->id] > 1;
+            }
+        }
+        const auto key = [] (const char* k) { return juce::String (juce::SystemStats::getOperatingSystemType() & juce::SystemStats::MacOSX ? juce::String::fromUTF8 ("\xe2\x8c\x98") : juce::String ("Ctrl+")) + k; };
+        juce::Component::SafePointer<TimelineView> tv (&owner);
+        const int id = clip->id;
+        const double snapped = ctx.snapBeat (atBeat, owner.getSnap());
+
         juce::PopupMenu m;
-        if (clip->type == Clip::Type::Midi)
-            m.addItem ("Edit notes", [this, id = clip->id] { if (owner.ctx.openEditor) owner.ctx.openEditor (id); });
-        m.addItem ("Split at playhead", [&p, id = clip->id, this] { p.beginEdit(); p.splitClip (id, owner.ctx.engine.getPositionBeats()); });
-        m.addItem ("Duplicate", [&p, id = clip->id] { p.beginEdit(); p.duplicateClip (id); });
+        m.addSectionHeader (many ? juce::String ((int) sel.size()) + " clips" : clip->name);
+        m.addItem (clip->type == Clip::Type::Midi ? "Edit notes" : "Edit pitch", [tv, id] { if (tv && tv->ctx.openEditor) tv->ctx.openEditor (id); });
+        m.addItem (juce::String::fromUTF8 ("\xe2\x96\xb6  Play this clip"), [tv, id] { if (tv) tv->ctx.engine.playClip (id); });
         m.addSeparator();
-        m.addItem ("Delete", [&p, id = clip->id] { p.beginEdit(); p.removeClip (id); });
+        juce::PopupMenu::Item cut ("Cut");        cut.shortcutKeyDescription = key ("X"); cut.isEnabled = anyUnlocked; cut.action = [tv] { if (tv) tv->cutSelection(); };
+        juce::PopupMenu::Item copy ("Copy");      copy.shortcutKeyDescription = key ("C"); copy.action = [tv] { if (tv) tv->copySelection(); };
+        juce::PopupMenu::Item paste ("Paste here"); paste.shortcutKeyDescription = key ("V"); paste.isEnabled = ! ctx.clipboard.empty();
+        paste.action = [tv, snapped] { if (tv) tv->pasteAt (snapped); };
+        juce::PopupMenu::Item dup ("Duplicate");  dup.shortcutKeyDescription = key ("D"); dup.action = [tv] { if (tv) tv->duplicateSelection(); };
+        m.addItem (cut); m.addItem (copy); m.addItem (paste); m.addItem (dup);
+        m.addSeparator();
+        m.addItem ("Split here", ! clip->locked, false, [tv, id, snapped] { if (tv) { tv->ctx.project.beginEdit(); tv->ctx.project.splitClip (id, snapped); } });
+        juce::PopupMenu::Item split ("Split at playhead"); split.shortcutKeyDescription = "S"; split.isEnabled = anyUnlocked;
+        split.action = [tv] { if (tv) tv->splitSelection (tv->ctx.engine.getPositionBeats()); };
+        m.addItem (split);
+        juce::PopupMenu::Item join ("Join into one clip"); join.shortcutKeyDescription = key ("J"); join.isEnabled = joinable;
+        join.action = [tv] { if (tv) tv->joinSelection(); };
+        m.addItem (join);
+        juce::PopupMenu::Item rev ("Reverse"); rev.shortcutKeyDescription = key ("R"); rev.isEnabled = anyUnlocked;
+        rev.action = [tv] { if (tv) tv->reverseSelection(); };
+        m.addItem (rev);
+        juce::PopupMenu::Item lock (allLocked ? "Unlock" : "Lock"); lock.shortcutKeyDescription = key ("L");
+        lock.action = [tv] { if (tv) tv->toggleLockSelection(); };
+        m.addItem (lock);
+        m.addItem ("Rename...", ! many, false, [tv, id] { if (tv) tv->renameClip (id); });
+        m.addItem ("Loop this", [tv] { if (tv) tv->loopSelection(); });
+        m.addSeparator();
+        juce::PopupMenu::Item del ("Delete"); del.shortcutKeyDescription = "Delete"; del.isEnabled = anyUnlocked;
+        del.action = [tv] { if (tv) tv->deleteSelection(); };
+        m.addItem (del);
         m.showMenuAsync ({});
     }
 
     void showLaneMenu (TrackPtr track, double beat)
     {
         auto& p = owner.ctx.project;
+        juce::Component::SafePointer<TimelineView> tv (&owner);
         juce::PopupMenu m;
+        m.addItem ("Paste here", ! owner.ctx.clipboard.empty(), false, [tv, beat] { if (tv) tv->pasteAt (beat); });
         if (track->type == Track::Type::Instrument)
             m.addItem ("New MIDI clip here", [this, &p, id = track->id, beat]
             {
@@ -1127,17 +1374,31 @@ public:
                     }
                 });
             });
+        m.addItem ("Select all clips on this track", [tv, track]
+        {
+            if (! tv) return;
+            std::vector<int> ids;
+            for (auto& c : track->clips) ids.push_back (c->id);
+            tv->ctx.setClipSelection (ids);
+            tv->repaint();
+        });
+        m.addItem ("Loop the highlighted area", owner.ctx.hasRange(), false, [tv] { if (tv) tv->loopSelection(); });
         m.showMenuAsync ({});
     }
 
+    juce::Rectangle<float> marquee;
+
 private:
-    enum class Mode { Move, Resize };
+    enum class Mode { None, Move, TrimLeft, TrimRight, Marquee };
+    struct Orig { ClipPtr clip; double start, offset, lenSec, lenBeats; std::vector<MidiNote> notes; int trackIndex; };
     TimelineView& owner;
-    ClipPtr dragClip;
-    TrackPtr origTrack;
-    Mode dragMode = Mode::Move;
-    double origStart = 0, origLengthBeats = 0, origLengthSeconds = 0, mouseDownBeat = 0;
-    bool dragging = false;
+    Mode mode = Mode::None;
+    std::vector<Orig> origs;
+    ClipPtr anchor;
+    std::vector<int> marqueeStartSelection;
+    double downBeat = 0;
+    int downRow = -1;
+    bool dragging = false, selectOnlyOnUp = false;
     int dragLaneTrack = -1, dragLane = -1, dragPoint = -1, dragLaneTop = 0;
     std::unique_ptr<juce::FileChooser> chooser;
 };
@@ -1245,6 +1506,12 @@ TimelineView::RowHit TimelineView::rowAt (int yInLanes) const
 
 double TimelineView::getSnap() const
 {
+    return ctx.snapOn ? getGridStep() : 0.0;
+}
+
+double TimelineView::getGridStep() const
+{
+    if (ctx.gridBeats > 0) return ctx.gridBeats;
     if (pixelsPerBeat >= 120) return 0.25;
     if (pixelsPerBeat >= 60)  return 0.5;
     if (pixelsPerBeat >= 14)  return 1.0;
@@ -1323,6 +1590,174 @@ void TimelineView::zoom (float factor, int aroundX)
     scrollX = juce::jmax (0.0, beatAt * pixelsPerBeat - aroundX);
     updateScrollBars();
     repaint();
+}
+
+// ---- clip editing ----
+namespace
+{
+    std::vector<int> unlockedOnly (Project& p, const std::vector<int>& ids)
+    {
+        std::vector<int> v;
+        for (int id : ids) if (auto c = p.findClip (id); c != nullptr && ! c->locked) v.push_back (id);
+        return v;
+    }
+}
+
+void TimelineView::deleteSelection()
+{
+    const auto ids = unlockedOnly (ctx.project, ctx.getSelectedClips());
+    if (ids.empty()) return;
+    ctx.project.beginEdit();
+    for (int id : ids) ctx.project.removeClip (id);
+    ctx.clearClipSelection();
+}
+
+void TimelineView::duplicateSelection()
+{
+    const auto ids = ctx.getSelectedClips();
+    if (ids.empty()) return;
+    ctx.project.beginEdit();
+    // the copies go right after the whole selection, keeping their spacing
+    const auto cb = clipops::copy (ctx.project, ids);
+    double first = 1.0e9;
+    for (int id : ids) if (auto c = ctx.project.findClip (id)) first = juce::jmin (first, c->startBeat);
+    ctx.setClipSelection (clipops::paste (ctx.project, cb, first + cb.span, -1));
+}
+
+void TimelineView::splitSelection (double beat)
+{
+    auto ids = unlockedOnly (ctx.project, ctx.getSelectedClips());
+    if (ids.empty())   // nothing selected: split whatever is under the playhead on the selected track
+        if (auto t = ctx.project.findTrack (ctx.selectedTrackId))
+            for (auto& c : t->clips)
+                if (! c->locked && beat > c->startBeat && beat < c->getEndBeat (ctx.project.bpm)) ids.push_back (c->id);
+    if (ids.empty()) return;
+    ctx.project.beginEdit();
+    std::vector<int> keep = ids;
+    for (int id : ids)
+        if (auto right = ctx.project.splitClip (id, beat)) keep.push_back (right->id);
+    ctx.setClipSelection (keep);
+}
+
+void TimelineView::copySelection()
+{
+    const auto ids = ctx.getSelectedClips();
+    if (! ids.empty()) ctx.clipboard = clipops::copy (ctx.project, ids);
+}
+
+void TimelineView::cutSelection()
+{
+    const auto ids = unlockedOnly (ctx.project, ctx.getSelectedClips());
+    if (ids.empty()) return;
+    ctx.clipboard = clipops::copy (ctx.project, ids);
+    ctx.project.beginEdit();
+    for (int id : ids) ctx.project.removeClip (id);
+    ctx.clearClipSelection();
+}
+
+void TimelineView::pasteAt (double beat)
+{
+    if (ctx.clipboard.empty()) return;
+    ctx.project.beginEdit();
+    ctx.setClipSelection (clipops::paste (ctx.project, ctx.clipboard, juce::jmax (0.0, beat), ctx.selectedTrackId));
+}
+
+void TimelineView::joinSelection()
+{
+    const auto ids = ctx.getSelectedClips();
+    if (ids.size() < 2) return;
+    ctx.project.beginEdit();
+    const auto made = clipops::join (ctx.project, ids);
+    if (! made.empty()) ctx.setClipSelection (made);
+}
+
+void TimelineView::reverseSelection()
+{
+    const auto ids = ctx.getSelectedClips();
+    if (ids.empty()) return;
+    ctx.project.beginEdit();
+    clipops::reverse (ctx.project, ids);
+}
+
+void TimelineView::toggleLockSelection()
+{
+    const auto ids = ctx.getSelectedClips();
+    if (ids.empty()) return;
+    bool allLocked = true;
+    for (int id : ids) if (auto c = ctx.project.findClip (id)) allLocked = allLocked && c->locked;
+    ctx.project.beginEdit();
+    {
+        const juce::ScopedLock sl (ctx.project.lock);
+        for (int id : ids) if (auto c = ctx.project.findClip (id)) c->locked = ! allLocked;
+    }
+    ctx.project.changed();
+}
+
+void TimelineView::selectAll()
+{
+    std::vector<int> ids;
+    for (auto& t : ctx.project.tracks) for (auto& c : t->clips) ids.push_back (c->id);
+    ctx.setClipSelection (ids);
+    repaint();
+}
+
+void TimelineView::nudgeSelection (int direction)
+{
+    const auto ids = unlockedOnly (ctx.project, ctx.getSelectedClips());
+    if (ids.empty()) return;
+    const double step = getGridStep() * direction;
+    for (int id : ids) if (auto c = ctx.project.findClip (id); c != nullptr && c->startBeat + step < -1.0e-9) return;
+    ctx.project.beginEdit();
+    {
+        const juce::ScopedLock sl (ctx.project.lock);
+        for (int id : ids) if (auto c = ctx.project.findClip (id)) c->startBeat = juce::jmax (0.0, c->startBeat + step);
+    }
+    ctx.project.changed();
+}
+
+void TimelineView::loopSelection()
+{
+    double a = -1, b = -1;
+    if (ctx.hasRange()) { a = ctx.rangeStart; b = ctx.rangeEnd; }
+    else
+        for (int id : ctx.getSelectedClips())
+            if (auto c = ctx.project.findClip (id))
+            {
+                a = a < 0 ? c->startBeat : juce::jmin (a, c->startBeat);
+                b = juce::jmax (b, c->getEndBeat (ctx.project.bpm));
+            }
+    if (a < 0 || b <= a) return;
+    ctx.project.beginEdit();
+    {
+        const juce::ScopedLock sl (ctx.project.lock);
+        ctx.project.loopStart = a;
+        ctx.project.loopEnd = b;
+        ctx.project.loopEnabled = true;
+    }
+    ctx.engine.setPositionBeats (a);
+    ctx.project.changed();
+}
+
+void TimelineView::renameClip (int clipId)
+{
+    auto c = ctx.project.findClip (clipId);
+    if (c == nullptr) return;
+    renameWindow = std::make_unique<juce::AlertWindow> ("Rename clip", "", juce::MessageBoxIconType::NoIcon, this);
+    renameWindow->addTextEditor ("name", c->name);
+    renameWindow->addButton ("Rename", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    renameWindow->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    renameWindow->enterModalState (true, juce::ModalCallbackFunction::create ([this, clipId] (int result)
+    {
+        const auto name = renameWindow->getTextEditorContents ("name").trim();
+        renameWindow.reset();
+        if (result != 1 || name.isEmpty()) return;
+        if (auto clip = ctx.project.findClip (clipId))
+        {
+            ctx.project.beginEdit();
+            { const juce::ScopedLock sl (ctx.project.lock); clip->name = name; }
+            ctx.project.changed();
+        }
+    }), false);
 }
 
 void TimelineView::zoomToFit()

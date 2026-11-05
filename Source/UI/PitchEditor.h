@@ -1,6 +1,7 @@
 #pragma once
 #include "AppContext.h"
 #include "../Pitch.h"
+#include "EditorRuler.h"
 
 namespace rs
 {
@@ -34,7 +35,7 @@ public:
     double scrollX = 0;     // px from the clip's first visible sample
     int scrollY = 0;
     int noteH = 16;
-    static constexpr int keysWidth = 56, toolbarH = 40, waveH = 44;
+    static constexpr int keysWidth = 56, toolbarH = 40, waveH = 44, rulerH = 18;
 
     double viewStartSec() const { return clip != nullptr ? clip->offsetSeconds : 0.0; }
     float secToX (double sec) const  { return (float) ((sec - viewStartSec()) * pxPerSec - scrollX); }
@@ -63,6 +64,8 @@ private:
     juce::Slider correct, drift;
     juce::Label correctLabel, driftLabel;
     juce::TextButton snapButton { "Snap to scale" }, resetButton { "Reset" }, abButton { "A/B" };
+    EditorRuler ruler { ctx };
+    IconButton playClip { "Play clip", IconButton::Icon::Play };
     bool sliderEditOpen = false;
 
     void changeListenerCallback (juce::ChangeBroadcaster*) override;

@@ -132,6 +132,7 @@ TrackPtr Project::addTrack (Track::Type type)
         t->colour = trackColourFor ((int) tracks.size());
         if (type == Track::Type::Instrument)
         {
+            t->autoName = true;   // takes the instrument's name
             t->synth = std::make_unique<RenaSynth>();
             if (onTrackCreated) onTrackCreated (*t);
         }
@@ -218,6 +219,23 @@ ClipPtr Project::duplicateClip (int clipId)
     }
     changed();
     return copy;
+}
+
+ClipPtr Project::addClipCopy (int trackId, const Clip& src, double startBeat)
+{
+    ClipPtr c;
+    {
+        const juce::ScopedLock sl (lock);
+        auto t = findTrack (trackId);
+        if (t == nullptr || (t->type == Track::Type::Audio) != (src.type == Clip::Type::Audio)) return nullptr;
+        c = std::make_shared<Clip> (src);
+        c->id = nextId++;
+        c->startBeat = juce::jmax (0.0, startBeat);
+        c->locked = false;
+        t->clips.push_back (c);
+    }
+    changed();
+    return c;
 }
 
 ClipPtr Project::splitClip (int clipId, double atBeat)
@@ -352,6 +370,7 @@ std::unique_ptr<juce::XmlElement> Project::toXml() const
         te->setAttribute ("mute", t->mute);
         te->setAttribute ("solo", t->solo);
         te->setAttribute ("armed", t->armed);
+        if (t->autoName) te->setAttribute ("autoName", true);
         te->setAttribute ("audioInput", t->audioInput);
         te->setAttribute ("audioInputStereo", t->audioInputStereo);
         if (t->midiInput.isNotEmpty()) te->setAttribute ("midiInput", t->midiInput);
@@ -377,6 +396,7 @@ std::unique_ptr<juce::XmlElement> Project::toXml() const
             ce->setAttribute ("id", c->id);
             ce->setAttribute ("name", c->name);
             ce->setAttribute ("start", c->startBeat);
+            if (c->locked) ce->setAttribute ("locked", true);
             if (c->type == Clip::Type::Audio)
             {
                 ce->setAttribute ("file", c->audio != nullptr ? c->audio->file.getFullPathName() : juce::String());
@@ -569,6 +589,7 @@ void Project::fromXml (const juce::XmlElement& root)
         t->mute = te->getBoolAttribute ("mute");
         t->solo = te->getBoolAttribute ("solo");
         t->armed = te->getBoolAttribute ("armed");
+        t->autoName = te->getBoolAttribute ("autoName");
         t->audioInput = te->getIntAttribute ("audioInput", 0);
         t->audioInputStereo = te->getBoolAttribute ("audioInputStereo", true);
         t->midiInput = te->getStringAttribute ("midiInput");
@@ -608,6 +629,7 @@ void Project::fromXml (const juce::XmlElement& root)
             id = juce::jmax (id, c->id + 1);
             c->name = ce->getStringAttribute ("name");
             c->startBeat = ce->getDoubleAttribute ("start");
+            c->locked = ce->getBoolAttribute ("locked");
             if (t->type == Track::Type::Audio)
             {
                 c->type = Clip::Type::Audio;

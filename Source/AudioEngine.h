@@ -48,6 +48,22 @@ public:
     void play();
     void stop();
     void togglePlay()               { isPlaying() ? stop() : play(); }
+
+    // plays one clip on its own (the editor's play button); stops at the clip's end
+    void playClip (int clipId);
+    int getPlayingClipId() const    { return soloClipId.load(); }
+    void updateClipPlayback();      // message thread, from a timer: stops at the end of the clip
+
+    // what's being recorded right now, for drawing it as it forms
+    struct RecordingPreview
+    {
+        double startBeat = 0, nowBeat = 0;
+        int instrumentTrackId = -1;
+        std::vector<MidiNote> notes;                       // absolute beats
+        struct Audio { int trackId = -1; std::vector<float> peaks; };
+        std::vector<Audio> audio;                          // peaks spread evenly from startBeat to nowBeat
+    };
+    bool getRecordingPreview (RecordingPreview&);
     void startRecording();
     bool isPlaying() const          { return playing.load(); }
     bool isRecording() const        { return recording.load(); }
@@ -111,10 +127,13 @@ private:
 
     // recording
     juce::TimeSliceThread writerThread { "Renasound recorder" };
-    struct Take { int trackId; int left, right; juce::File file; std::unique_ptr<juce::AudioFormatWriter::ThreadedWriter> writer; };
+    struct Take { int trackId; int left, right; juce::File file; std::unique_ptr<juce::AudioFormatWriter::ThreadedWriter> writer; std::vector<float> peaks; };
     std::vector<Take> takes;                         // one per armed audio track (message thread)
-    struct RecSlot { juce::AudioFormatWriter::ThreadedWriter* writer = nullptr; int left = 0, right = 0; };
+    struct RecSlot { juce::AudioFormatWriter::ThreadedWriter* writer = nullptr; int left = 0, right = 0; float* peaks = nullptr; int peakCap = 0; };
     std::array<RecSlot, 64> recSlots;                // what the audio thread writes
+    std::array<std::atomic<int>, 64> recPeakCount {};
+    std::atomic<int> soloClipId { 0 };
+    double soloClipReturnBeat = 0;
     std::atomic<int> numRecSlots { 0 };
     double recordStartBeat = 0;
     int recordInstrumentTrackId = -1;

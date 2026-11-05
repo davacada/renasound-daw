@@ -6,22 +6,6 @@ A Mixcraft-style music DAW for **macOS and Windows**, written in C++ with JUCE.
 
 ![RENASOUND](docs/screenshot.png)
 
-## What's new in 0.9.2
-
-- The **Update** button now downloads from the public [renasound-releases](https://github.com/davacada/renasound-releases) repo, so it works while this code stays private. Install 0.9.2 by hand once; after that, Update does it for you.
-
-## What's new in 0.9
-
-- **New faceplates for the built-in effects**, each with its own look and live graphics:
-  - **Compressor:** a VU needle for gain reduction, the dynamics curve with the live level riding on it, and gain reduction over time.
-  - **Reverb:** a 3D room shaped by Size and Width, with walls that soften with Damping and wavefronts that start after the pre-delay.
-  - **Delay:** every echo as a bar in time, left and right for ping-pong, getting duller with Tone.
-  - **EQ:** draggable band points on the curve. **Tube EQ:** enamel panel, a glowing tube and a small curve screen.
-  - **Noise Gate:** level against the threshold with an open / closed light. **Gater:** the step pattern with a playhead. **Phaser:** sweeping notches. **Chorus:** drifting voices.
-- **Presets on every device** (built-in effects and instruments, and plugins): a preset bar with Save, Delete, Default and previous / next. Presets live in Music/RENASOUND/Presets.
-- **Musical typing:** the piano button next to BPM lets the computer keyboard play the selected instrument (A to ; white keys, W E T Y U O P black keys, Z / X octave, C / V velocity).
-- **An input on each channel:** audio tracks record from any input or stereo pair of your interface, and several armed tracks record at once; instrument tracks can listen to all MIDI or to one controller.
-
 ## What's new in 0.8
 
 **Look:** "black sandstone": warm near-black with a fine stone grain, sand accents, and borderless buttons that only light up on hover or when switched on.

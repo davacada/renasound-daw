@@ -1,5 +1,7 @@
 #pragma once
 #include "../AudioEngine.h"
+#include "../ClipOps.h"
+#include <set>
 #include "Theme.h"
 
 namespace rs
@@ -42,9 +44,64 @@ struct AppContext
         if (onSelectionChanged) onSelectionChanged();
     }
 
+    // ---- clip selection: selectedClipId is the one the editor shows, selectedClips all of them ----
+    std::set<int> selectedClips;
+    bool isClipSelected (int id) const { return selectedClips.count (id) > 0; }
+
+    std::vector<int> getSelectedClips() const
+    {
+        std::vector<int> v;
+        for (int id : selectedClips) if (project.findClip (id) != nullptr) v.push_back (id);
+        return v;
+    }
+
+    void clearClipSelection()
+    {
+        selectedClips.clear();
+        selectedClipId = -1;
+        if (onSelectionChanged) onSelectionChanged();
+    }
+
+    void toggleClipSelection (int id)
+    {
+        if (isClipSelected (id))
+        {
+            selectedClips.erase (id);
+            if (selectedClipId == id) selectedClipId = selectedClips.empty() ? -1 : *selectedClips.begin();
+            if (onSelectionChanged) onSelectionChanged();
+        }
+        else
+        {
+            selectedClips.insert (id);
+            selectedClipId = id;
+            TrackPtr owner;
+            if (project.findClip (id, &owner) != nullptr && owner != nullptr) selectTrack (owner->id);
+            else if (onSelectionChanged) onSelectionChanged();
+        }
+    }
+
+    void setClipSelection (const std::vector<int>& ids)
+    {
+        selectedClips = std::set<int> (ids.begin(), ids.end());
+        if (! isClipSelected (selectedClipId)) selectedClipId = ids.empty() ? -1 : ids.front();
+        if (onSelectionChanged) onSelectionChanged();
+    }
+
+    // a highlighted stretch of time (drag on empty lanes); L loops it
+    double rangeStart = -1, rangeEnd = -1;
+    bool hasRange() const { return rangeEnd > rangeStart && rangeStart >= 0; }
+
+    // snap to grid (the Snap button next to the piano button): gridBeats 0 = follows the zoom
+    bool snapOn = true;
+    double gridBeats = 0;
+
+    clipops::Clipboard clipboard;
+
     void selectClip (int clipId)
     {
         selectedClipId = clipId;
+        selectedClips.clear();
+        if (clipId >= 0) selectedClips.insert (clipId);
         TrackPtr owner;
         if (project.findClip (clipId, &owner) != nullptr && owner != nullptr)
             selectTrack (owner->id);

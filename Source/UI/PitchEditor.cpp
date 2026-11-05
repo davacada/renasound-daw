@@ -339,6 +339,25 @@ PitchEditor::PitchEditor (AppContext& c, PitchService& s) : ctx (c), service (s)
 {
     keys = std::make_unique<Keys> (*this);
     notesView = std::make_unique<NoteView> (*this);
+
+    // a ruler that moves the playhead, and a button that plays just this clip
+    addAndMakeVisible (ruler);
+    ruler.xToBeat = [this] (float x)
+    {
+        if (clip == nullptr) return 0.0;
+        const double spb = 60.0 / ctx.project.bpm;
+        return (clip->startBeat * spb + (xToSec (x) - clip->offsetSeconds)) / spb;
+    };
+    ruler.beatToX = [this] (double b)
+    {
+        if (clip == nullptr) return 0.0f;
+        const double spb = 60.0 / ctx.project.bpm;
+        return secToX (b * spb - clip->startBeat * spb + clip->offsetSeconds);
+    };
+    ruler.clipSpan = [this] { return clip != nullptr ? std::pair<double, double> { clip->startBeat, clip->getEndBeat (ctx.project.bpm) } : std::pair<double, double> { 0, 0 }; };
+    addAndMakeVisible (playClip);
+    setUpPlayClipButton (playClip);
+    playClip.onClick = [this] { if (clip != nullptr) ctx.engine.playClip (clip->id); };
     addAndMakeVisible (*keys);
     addAndMakeVisible (*notesView);
     addAndMakeVisible (hScroll);
@@ -568,6 +587,8 @@ void PitchEditor::resized()
 {
     auto r = getLocalBounds();
     auto bar = r.removeFromTop (toolbarH).reduced (8, 7);
+    playClip.setBounds (bar.removeFromLeft (34));
+    bar.removeFromLeft (8);
     abButton.setBounds (bar.removeFromRight (52));     bar.removeFromRight (6);
     resetButton.setBounds (bar.removeFromRight (60));  bar.removeFromRight (6);
     snapButton.setBounds (bar.removeFromRight (110));  bar.removeFromRight (10);
@@ -582,6 +603,7 @@ void PitchEditor::resized()
 
     hScroll.setBounds (r.removeFromBottom (12).withTrimmedLeft (keysWidth).withTrimmedRight (12));
     r.removeFromBottom (waveH);
+    ruler.setBounds (r.removeFromTop (rulerH).withTrimmedLeft (keysWidth).withTrimmedRight (12));
     vScroll.setBounds (r.removeFromRight (12));
     keys->setBounds (r.removeFromLeft (keysWidth));
     notesView->setBounds (r);
@@ -688,6 +710,12 @@ bool PitchEditor::keyPressed (const juce::KeyPress& k)
 
 void PitchEditor::timerCallback()
 {
+    playClip.setEnabled (clip != nullptr);
+    {
+        const bool on = clip != nullptr && ctx.engine.getPlayingClipId() == clip->id;
+        playClip.setToggleState (on, juce::dontSendNotification);
+        playClip.setIcon (on ? IconButton::Icon::Stop : IconButton::Icon::Play);
+    }
     // status line + playhead
     juce::String s;
     if (clip != nullptr)

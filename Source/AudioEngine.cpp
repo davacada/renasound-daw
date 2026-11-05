@@ -150,11 +150,19 @@ juce::File AudioEngine::getRecordingsFolder()
 // =============================================================================
 void AudioEngine::play()
 {
+    soloClipId = 0;
     playing = true;
 }
 
 void AudioEngine::stop()
 {
+    if (soloClipId.load() != 0)
+    {
+        playing = false;
+        soloClipId = 0;
+        setPositionBeats (soloClipReturnBeat);
+        return;
+    }
     if (! playing && ! recording)
     {
         setPositionBeats (0);   // second press of stop returns to the start, like Mixcraft
@@ -162,6 +170,50 @@ void AudioEngine::stop()
     }
     playing = false;
     if (recording) finishRecording();
+}
+
+void AudioEngine::playClip (int clipId)
+{
+    if (recording) return;
+    if (soloClipId.load() == clipId && playing) { stop(); return; }   // the button toggles
+    auto c = project.findClip (clipId);
+    if (c == nullptr) return;
+    const double pos = getPositionBeats();
+    const double start = (pos > c->startBeat && pos < c->getEndBeat (project.bpm) - 0.05) ? pos : c->startBeat;
+    soloClipReturnBeat = start;
+    playing = false;
+    setPositionBeats (start);
+    soloClipId = clipId;
+    playing = true;
+}
+
+void AudioEngine::updateClipPlayback()
+{
+    const int id = soloClipId.load();
+    if (id == 0) return;
+    auto c = project.findClip (id);
+    if (c == nullptr || ! playing || getPositionBeats() >= c->getEndBeat (project.bpm)) stop();
+}
+
+bool AudioEngine::getRecordingPreview (RecordingPreview& out)
+{
+    if (! recording) return false;
+    out.startBeat = recordStartBeat;
+    out.nowBeat = getPositionBeats();
+    out.instrumentTrackId = recordInstrumentTrackId;
+    out.notes.clear();
+    out.audio.clear();
+    const juce::SpinLock::ScopedLockType sl (previewLock);
+    out.notes = recordedNotes;
+    for (int p = 0; p < 128; ++p)   // notes still held grow up to the playhead
+        if (heldNoteStart[(size_t) p] >= 0)
+            out.notes.push_back ({ p, heldNoteStart[(size_t) p], juce::jmax (0.05, out.nowBeat - heldNoteStart[(size_t) p]), heldNoteVelocity[(size_t) p] });
+    for (int i = 0; i < (int) takes.size() && i < numRecSlots.load(); ++i)
+    {
+        const int n = juce::jmin (recPeakCount[(size_t) i].load(), (int) takes[(size_t) i].peaks.size());
+        out.audio.push_back ({ takes[(size_t) i].trackId, std::vector<float> (takes[(size_t) i].peaks.begin(), takes[(size_t) i].peaks.begin() + n) });
+    }
+    return true;
 }
 
 double AudioEngine::getPositionBeats() const
@@ -207,7 +259,8 @@ void AudioEngine::startRecording()
     const auto stamp = juce::Time::getCurrentTime().formatted ("%Y-%m-%d %H-%M-%S");
     for (auto& w : wanted)
     {
-        Take take { w.id, w.left, w.right, {}, nullptr };
+        Take take { w.id, w.left, w.right, {}, nullptr, {} };
+        take.peaks.resize ((size_t) 1 << 19);   // one level per audio block, for drawing the take as it records
         take.file = getRecordingsFolder().getNonexistentChildFile ("Take " + stamp + (wanted.size() > 1 ? " T" + juce::String (w.id) : juce::String()), ".wav");
         juce::WavAudioFormat wav;
         std::unique_ptr<juce::OutputStream> stream (take.file.createOutputStream());
@@ -225,7 +278,11 @@ void AudioEngine::startRecording()
         const juce::SpinLock::ScopedLockType sl (previewLock);
         int n = 0;
         for (auto& t : takes)
-            if (n < (int) recSlots.size()) recSlots[(size_t) n++] = { t.writer.get(), t.left, t.right };
+            if (n < (int) recSlots.size())
+            {
+                recPeakCount[(size_t) n] = 0;
+                recSlots[(size_t) n++] = { t.writer.get(), t.left, t.right, t.peaks.data(), (int) t.peaks.size() };
+            }
         numRecSlots = n;
     }
 
@@ -569,6 +626,14 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* in, int 
                     const auto& slot = recSlots[(size_t) i];
                     const float* chans[2] = { chan (slot.left), chan (slot.right) };
                     slot.writer->write (chans, numSamples);
+                    const int pc = recPeakCount[(size_t) i].load();
+                    if (pc < slot.peakCap)
+                    {
+                        float pk = 0.0f;
+                        for (int k = 0; k < numSamples; ++k) pk = juce::jmax (pk, std::abs (chans[0][k]), std::abs (chans[1][k]));
+                        slot.peaks[pc] = pk;
+                        recPeakCount[(size_t) i] = pc + 1;
+                    }
                 }
             if (recordInstrumentTrackId >= 0)
             {
@@ -693,6 +758,14 @@ void AudioEngine::renderBlock (juce::AudioBuffer<float>& out, double startSec, i
     for (auto& t : project.tracks)
         anySolo = anySolo || t->solo;
 
+    // playing one clip on its own: only its track is heard
+    const int soloClip = transportRunning ? soloClipId.load() : 0;
+    const Track* soloClipTrack = nullptr;
+    if (soloClip != 0)
+        for (auto& t : project.tracks)
+            for (auto& c : t->clips)
+                if (c->id == soloClip) soloClipTrack = t.get();
+
     playheadSeconds = startSec;
     playheadRunning = transportRunning;
 
@@ -779,7 +852,7 @@ void AudioEngine::renderBlock (juce::AudioBuffer<float>& out, double startSec, i
             for (int ch = 0; ch < 2; ++ch) t.sidechainOut.copyFrom (ch, 0, t.scratch, ch, 0, numSamples);
         }
 
-        const bool audible = ! t.mute && (! anySolo || t.solo);
+        const bool audible = soloClip != 0 ? &t == soloClipTrack : ! t.mute && (! anySolo || t.solo);
         auto left  = [] (float v, float p) { return v * juce::jmin (1.0f, 1.0f - p); };
         auto right = [] (float v, float p) { return v * juce::jmin (1.0f, 1.0f + p); };
         t.scratch.applyGainRamp (0, 0, numSamples, left (vol0, pan0), left (vol1, pan1));
@@ -809,8 +882,10 @@ void AudioEngine::renderTrack (Track& t, double startSec, int numSamples, bool t
     {
         if (! transportRunning) return;
 
+        const int soloClip = soloClipId.load();
         for (auto& c : t.clips)
         {
+            if (soloClip != 0 && c->id != soloClip) continue;
             const AudioData* data = c->getPlaybackAudio();
             if (data == nullptr) continue;
             const double cs = c->startBeat * spb;
@@ -865,15 +940,17 @@ void AudioEngine::renderTrack (Track& t, double startSec, int numSamples, bool t
         auto toSample = [&] (double sec) { return juce::jlimit (0, numSamples - 1, (int) ((sec - startSec) * sampleRate)); };
 
         // note-offs first so a repeated note retriggers cleanly
+        const int soloClip = soloClipId.load();
         for (int pass = 0; pass < 2; ++pass)
             for (auto& c : t.clips)
             {
+                if (soloClip != 0 && c->id != soloClip) continue;
                 const double cs = c->startBeat * spb;
                 if (cs >= endSec || cs + c->lengthBeats * spb < startSec - 1.0) continue;
 
                 for (auto& n : c->notes)
                 {
-                    if (n.start >= c->lengthBeats) continue;
+                    if (n.start >= c->lengthBeats || n.start < 0) continue;   // trimmed away
                     const double on  = cs + n.start * spb;
                     const double off = cs + juce::jmin (n.start + n.length, c->lengthBeats) * spb;
 

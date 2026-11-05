@@ -30,7 +30,24 @@ public:
     void rebuild();
     void zoom (float factor, int aroundX = -1);
     void zoomToFit();   // show the whole song
-    double getSnap() const;
+    double getSnap() const;       // 0 when snap is off
+    double getGridStep() const;   // the grid, whether or not snapping is on
+
+    // clip editing, shared by the right-click menus and the keyboard commands
+    bool hasClipSelection() const { return ! ctx.getSelectedClips().empty(); }
+    void deleteSelection();
+    void duplicateSelection();
+    void splitSelection (double beat);
+    void cutSelection();
+    void copySelection();
+    void pasteAt (double beat);
+    void joinSelection();
+    void reverseSelection();
+    void toggleLockSelection();
+    void selectAll();
+    void nudgeSelection (int direction);   // by one grid step
+    void loopSelection();                  // loop the highlighted area, or the selected clips
+    void renameClip (int clipId);
 
     // geometry
     static constexpr int headerWidth = 340, rulerHeight = 30, trackHeight = 78, laneHeight = 56;
@@ -72,6 +89,7 @@ private:
     juce::OwnedArray<TrackHeader> headers;
     juce::Component headerHolder;
     juce::ScrollBar hScroll { false }, vScroll { true };
+    std::unique_ptr<juce::AlertWindow> renameWindow;
     double dropIndicatorBeat = -1;
     int dropIndicatorTrack = -1;
 

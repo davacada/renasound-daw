@@ -636,6 +636,15 @@ PianoRoll::PianoRoll (AppContext& c) : ctx (c)
     addAndMakeVisible (title);
     title.setFont (theme::font (14.0f, true));
 
+    // a ruler that moves the playhead, and a button that plays just this clip
+    addAndMakeVisible (ruler);
+    ruler.xToBeat = [this] (float x) { return (clip != nullptr ? clip->startBeat : 0.0) + (x + scrollX) / pixelsPerBeat; };
+    ruler.beatToX = [this] (double b) { return (float) ((b - (clip != nullptr ? clip->startBeat : 0.0)) * pixelsPerBeat - scrollX); };
+    ruler.clipSpan = [this] { return clip != nullptr ? std::pair<double, double> { clip->startBeat, clip->startBeat + clip->lengthBeats } : std::pair<double, double> { 0, 0 }; };
+    addAndMakeVisible (playClip);
+    setUpPlayClipButton (playClip);
+    playClip.onClick = [this] { if (clip != nullptr) ctx.engine.playClip (clip->id); };
+
     addAndMakeVisible (preset);
     const auto& all = getSynthPresets();
     for (int i = 0; i < (int) all.size(); ++i)
@@ -756,6 +765,8 @@ void PianoRoll::resized()
 {
     auto r = getLocalBounds();
     auto bar = r.removeFromTop (toolbarHeight).reduced (8, 5);
+    playClip.setBounds (bar.removeFromLeft (36));
+    bar.removeFromLeft (8);
     selectTool.setBounds (bar.removeFromLeft (78));
     editTool.setBounds (bar.removeFromLeft (64));
     drawTool.setBounds (bar.removeFromLeft (70));
@@ -767,6 +778,7 @@ void PianoRoll::resized()
     title.setBounds (bar);
 
     hScroll.setBounds (r.removeFromBottom (12).withTrimmedLeft (keysWidth).withTrimmedRight (12));
+    ruler.setBounds (r.removeFromTop (rulerHeight).withTrimmedLeft (keysWidth).withTrimmedRight (12));
     vScroll.setBounds (r.removeFromRight (12));
     keys->setBounds (r.removeFromLeft (keysWidth));
     grid->setBounds (r);
@@ -791,6 +803,7 @@ void PianoRoll::scrollBarMoved (juce::ScrollBar* b, double start)
 {
     if (b == &hScroll) scrollX = start;
     else               scrollY = (int) start;
+    ruler.repaint();
     repaint();
 }
 
@@ -892,6 +905,10 @@ void PianoRoll::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWhee
 void PianoRoll::timerCallback()
 {
     if (ctx.engine.isPlaying() && clip != nullptr) grid->repaint();
+    playClip.setEnabled (clip != nullptr);
+    const bool on = clip != nullptr && ctx.engine.getPlayingClipId() == clip->id;
+    playClip.setToggleState (on, juce::dontSendNotification);
+    playClip.setIcon (on ? IconButton::Icon::Stop : IconButton::Icon::Play);
 }
 
 } // namespace rs

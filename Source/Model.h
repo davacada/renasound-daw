@@ -93,6 +93,7 @@ struct Clip
     int id = 0;
     juce::String name;
     double startBeat = 0;
+    bool locked = false;        // can't be moved, trimmed or deleted until unlocked
 
     // Audio clips
     AudioDataPtr audio;
@@ -113,7 +114,7 @@ struct Clip
         return audio.get();
     }
 
-    // MIDI clips
+    // MIDI clips (notes outside 0..lengthBeats are kept but not played, so trimming isn't destructive)
     double lengthBeats = 4;
     std::vector<MidiNote> notes;
 
@@ -200,6 +201,7 @@ struct Track
     float volume = 0.8f;    // linear gain, 0..1.5
     float pan = 0.0f;       // -1..1
     bool mute = false, solo = false, armed = false;
+    bool autoName = false;   // the name follows the chosen instrument until the user renames the track
     std::vector<ClipPtr> clips;
 
     // Where the track records from.
@@ -273,6 +275,8 @@ public:
     void removeClip (int clipId);
     ClipPtr duplicateClip (int clipId);
     ClipPtr splitClip (int clipId, double atBeat);   // returns the right-hand part
+    ClipPtr addClipCopy (int trackId, const Clip&, double startBeat);   // a copy with a new id (paste)
+    int newId() { return nextId++; }
 
     // effects: trackId -1 means the master bus
     void addFx (int trackId, FxPtr, int index = -1);

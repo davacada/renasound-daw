@@ -6,6 +6,7 @@
 #include "../Source/MixcraftImport.h"
 #include "../Source/AbletonImport.h"
 #include "../Source/Drums.h"
+#include "../Source/ClipOps.h"
 
 int main (int argc, char** argv)
 {
@@ -99,6 +100,68 @@ int main (int argc, char** argv)
         { rs::DrumMachine d; auto b = hit (d, [&] (rs::DrumMachine& x) { set (x, "c20", 100); juce::MemoryBlock mb; x.getStateInformation (mb); x.setStateInformation (mb.getData(), (int) mb.getSize()); }); report ("click 100 (resynth)", b); }
         return 0;
     }
+    if (argc >= 2 && juce::String (argv[1]) == "--clipops")
+    {
+        rs::AudioCache cache;
+        rs::Project project (cache);
+        project.bpm = 120;   // 0.5 s per beat
+        // a ramp file: sample i = i / n, so reversing is easy to check
+        auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("rs-clipops");
+        dir.createDirectory();
+        auto rampFile = dir.getChildFile ("ramp.wav");
+        {
+            juce::AudioBuffer<float> b (2, 48000);
+            for (int i = 0; i < 48000; ++i) { b.setSample (0, i, i / 48000.0f); b.setSample (1, i, i / 48000.0f); }
+            rampFile.deleteFile();
+            juce::WavAudioFormat wav;
+            std::unique_ptr<juce::OutputStream> os (rampFile.createOutputStream());
+            auto w = wav.createWriterFor (os, juce::AudioFormatWriterOptions{}.withSampleRate (48000).withNumChannels (2).withBitsPerSample (24));
+            w->writeFromAudioSampleBuffer (b, 0, 48000);
+        }
+        auto at = project.addTrack (rs::Track::Type::Audio);
+        auto a1 = project.addAudioClip (at->id, rampFile, 0);           // 1 s = 2 beats
+        auto a2 = project.addAudioClip (at->id, rampFile, 4);           // beats 4..6
+        a1->offsetSeconds = 0.25; a1->lengthSeconds = 0.5;              // middle half of the ramp
+        rs::clipops::reverse (project, { a1->id });
+        auto& rb = a1->audio->buffer;
+        std::cout << "reverse audio: first " << rb.getSample (0, 0) << " (want ~0.75), last " << rb.getSample (0, rb.getNumSamples() - 1)
+                  << " (want ~0.25), length " << a1->lengthSeconds << " s, name '" << a1->name << "'\n";
+
+        auto it = project.addTrack (rs::Track::Type::Instrument);
+        auto m1 = project.addMidiClip (it->id, 0, 4);
+        m1->notes = { { 60, 0.0, 1.0, 0.8f }, { 64, 2.0, 0.5, 0.8f }, { 67, -1.0, 0.5, 0.8f } };   // the last one is trimmed away
+        auto m2 = project.addMidiClip (it->id, 8, 4);
+        m2->notes = { { 72, 1.0, 1.0, 0.8f } };
+        rs::clipops::reverse (project, { m1->id });
+        std::cout << "reverse midi:";
+        for (auto& n : m1->notes) std::cout << " " << n.pitch << "@" << n.start << "+" << n.length;
+        std::cout << "  (want 64@1.5+0.5 60@3+1)\n";
+
+        const auto joined = rs::clipops::join (project, { m1->id, m2->id, a1->id, a2->id });
+        std::cout << "join: " << joined.size() << " clips made; instrument track has " << it->clips.size() << " clip(s), audio track " << at->clips.size() << "\n";
+        for (auto& c : it->clips)
+        {
+            std::cout << "  midi clip " << c->startBeat << "+" << c->lengthBeats << ":";
+            for (auto& n : c->notes) std::cout << " " << n.pitch << "@" << n.start;
+            std::cout << "  (want 0+12: 64@1.5 60@3 72@9)\n";
+        }
+        for (auto& c : at->clips)
+        {
+            auto& b = c->audio->buffer;
+            const int sr = (int) c->audio->sampleRate;
+            std::cout << "  audio clip " << c->startBeat << " len " << c->lengthSeconds << " s (want 3): at 0.1 s " << b.getSample (0, sr / 10)
+                      << " (reversed ramp, want ~0.65), at 1.5 s " << b.getSample (0, sr * 3 / 2) << " (gap, want 0), at 2.5 s " << b.getSample (0, sr * 5 / 2) << " (want ~0.5)\n";
+        }
+
+        auto cb = rs::clipops::copy (project, { it->clips.front()->id });
+        const auto pasted = rs::clipops::paste (project, cb, 16, it->id);
+        std::cout << "paste: " << pasted.size() << " clip at " << project.findClip (pasted.front())->startBeat << " with "
+                  << project.findClip (pasted.front())->notes.size() << " notes\n";
+        dir.deleteRecursively();
+        for (auto& c : at->clips) c->audio->file.deleteFile();
+        return 0;
+    }
+
     if (argc >= 2 && juce::String (argv[1]) == "--inputs")
     {
         // two armed audio tracks on different inputs record at once, each from its own input
@@ -147,6 +210,40 @@ int main (int argc, char** argv)
             engine.audioDeviceIOCallbackWithContext (in, 4, out.getArrayOfWritePointers(), 2, 512, {});
         engine.stop();
         juce::Thread::sleep (300);
+        // play just track 2's clip: only its sound (equal left and right) comes out
+        if (! b->clips.empty())
+        {
+            engine.playClip (b->clips[0]->id);
+            float l = 0, r = 0;
+            for (int i = 0; i < 20; ++i)
+            {
+                engine.audioDeviceIOCallbackWithContext (in, 4, out.getArrayOfWritePointers(), 2, 512, {});
+                l = out.getSample (0, 256); r = out.getSample (1, 256);
+            }
+            std::cout << "play clip: playing id " << engine.getPlayingClipId() << ", out L " << l << " R " << r << " (want equal: only track 2)\n";
+            engine.stop();
+        }
+
+        // MIDI recording shows up while it records
+        auto inst = project.addTrack (rs::Track::Type::Instrument);
+        a->armed = b->armed = c->armed = false;
+        inst->armed = true;
+        engine.liveInputTrackId = inst->id;
+        engine.startRecording();
+        engine.keyboardState.noteOn (1, 60, 0.8f);
+        for (int i = 0; i < 50; ++i) engine.audioDeviceIOCallbackWithContext (in, 4, out.getArrayOfWritePointers(), 2, 512, {});
+        {
+            rs::AudioEngine::RecordingPreview pv;
+            engine.getRecordingPreview (pv);
+            std::cout << "recording preview: " << pv.notes.size() << " note(s) so far";
+            if (! pv.notes.empty()) std::cout << ", pitch " << pv.notes[0].pitch << " held for " << pv.notes[0].length << " beats";
+            std::cout << "\n";
+        }
+        engine.keyboardState.noteOff (1, 60, 0.0f);
+        for (int i = 0; i < 10; ++i) engine.audioDeviceIOCallbackWithContext (in, 4, out.getArrayOfWritePointers(), 2, 512, {});
+        engine.stop();
+        std::cout << "after recording: instrument track has " << inst->clips.size() << " clip(s) with " << (inst->clips.empty() ? 0 : (int) inst->clips[0]->notes.size()) << " note(s)\n";
+
         for (auto& t : { a, b, c })
         {
             std::cout << "track " << t->id << " (" << rs::AudioEngine::describeInput (*t) << "): " << t->clips.size() << " clip(s)";
