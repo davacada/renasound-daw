@@ -1,5 +1,6 @@
 #include "ReleasePool.h"
 #include "MultiSampler.h"
+#include "SoundMatch.h"
 #include "DspHelpers.h"
 #include "NcwReader.h"
 #include "UI/Faceplate.h"
@@ -749,6 +750,15 @@ namespace
     const Sf2Gen* findGen (const Sf2Zone& z, int oper) { for (auto& g : z.gens) if (g.oper == oper) return &g; return nullptr; }
 }
 
+std::vector<Sf2PresetInfo> sf2PresetList (const juce::File& file)
+{
+    std::vector<Sf2PresetInfo> out;
+    juce::String error;
+    if (auto sf = openSf2 (file, error))
+        for (auto& p : sf->presets) out.push_back ({ p.bank, p.program, juce::String (p.name) });
+    return out;
+}
+
 InstrumentPtr loadSf2 (const juce::File& file, int presetIndex, std::atomic<float>* progress, juce::String& error)
 {
     auto sf = openSf2 (file, error);
@@ -1119,6 +1129,8 @@ private:
         auto f = pending;
         auto result = cached (f, pendingPreset, &progress, err);
         if (threadShouldExit()) { loading = false; return; }
+        if (result != nullptr && result->sf2Presets.size() >= 100)
+            soundmatch::noticeSoundFont (result->source);   // a full General MIDI bank: imports can use it too
         if (result != nullptr)
         {
             if (restoring)

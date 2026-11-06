@@ -43,6 +43,12 @@ public:
     const juce::String getApplicationVersion() override { return JUCE_APPLICATION_VERSION_STRING; }
     bool moreThanOneInstanceAllowed() override          { return false; }
 
+    static bool opensAsProject (const juce::String& path)
+    {
+        const auto ext = path.fromLastOccurrenceOf (".", false, false).toLowerCase();
+        return ext == "renasound" || ext == "als" || ext.startsWith ("mx") || ext == "mid" || ext == "midi" || ext == "kar";
+    }
+
     void initialise (const juce::String& commandLine) override
     {
         mainWindow = std::make_unique<MainWindow>();
@@ -50,14 +56,14 @@ public:
 
         // opening a .renasound file from Finder / Explorer
         auto path = commandLine.unquoted().trim();
-        if ((path.endsWithIgnoreCase (".renasound") || path.endsWithIgnoreCase (".als") || path.fromLastOccurrenceOf (".", false, false).startsWithIgnoreCase ("mx")) && juce::File::isAbsolutePath (path))
+        if (opensAsProject (path) && juce::File::isAbsolutePath (path))
             mainWindow->content->loadProjectFile (juce::File (path));
     }
 
     void anotherInstanceStarted (const juce::String& commandLine) override
     {
         auto path = commandLine.unquoted().trim();
-        if (mainWindow != nullptr && (path.endsWithIgnoreCase (".renasound") || path.endsWithIgnoreCase (".als") || path.fromLastOccurrenceOf (".", false, false).startsWithIgnoreCase ("mx")) && juce::File::isAbsolutePath (path))
+        if (mainWindow != nullptr && opensAsProject (path) && juce::File::isAbsolutePath (path))
             mainWindow->content->askToSaveThen ([this, path] { mainWindow->content->loadProjectFile (juce::File (path)); });
     }
 

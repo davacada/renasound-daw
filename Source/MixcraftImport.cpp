@@ -1,6 +1,6 @@
 #include "MixcraftImport.h"
 #include "Effects.h"
-#include <optional>
+#include "SoundMatch.h"
 
 namespace rs
 {
@@ -52,7 +52,10 @@ namespace
             const size_t size = r.u32 (off + 4);
             if (size > end - off - 8) break;   // corrupt / truncated
             if (cid == "RIFF" || cid == "LIST")
+            {
+                out.push_back ({ "LIST:" + r.id (off + 8), off + 12, size });   // marks where a list starts (e.g. a track's instrument)
                 collectChunks (r, off + 12, off + 8 + size, out, depth + 1);
+            }
             else
                 out.push_back ({ cid, off + 8, size });
             off += 8 + size + (size & 1);
@@ -66,49 +69,13 @@ namespace
     {
         bool midi = false;
         juce::String name, instrument;
+        juce::String category, icon, device;   // "Keyboard - Piano", "_drumkit.png", "Acoustica Studio Drums"
+        juce::MemoryBlock deviceState;         // a VST3 instrument's settings, when Mixcraft kept them in JUCE's format
         double volume = 1.0, pan = 0.0;
         bool mute = false;
         std::vector<AudioClipIn> audio;
         std::vector<MidiClipIn> midiClips;
     };
-
-    int presetFor (const juce::String& instrument)
-    {
-        const auto s = instrument.toLowerCase();
-        auto has = [&s] (std::initializer_list<const char*> words) { for (auto* w : words) if (s.contains (w)) return true; return false; };
-        if (has ({ "sub" }))                                   return 6;   // Sub Bass
-        if (has ({ "bass" }))                                  return 3;   // Bass
-        if (has ({ "piano", "rhodes", "keys", "organ", "ep" })) return 4;  // E-Piano
-        if (has ({ "pad", "string", "choir", "warm" }))        return 1;   // Soft Pad
-        if (has ({ "pluck", "guzheng", "harp", "guitar", "koto" })) return 2;   // Pluck
-        if (has ({ "square", "chip", "8bit" }))                return 5;   // Square Keys
-        return 0;                                                          // Saw Lead
-    }
-
-    // Mixcraft's bundled instruments, played by their RENASOUND counterparts (set up to match)
-    struct Counterpart { juce::String type; std::vector<std::pair<const char*, float>> params; };
-    std::optional<Counterpart> counterpartFor (const juce::String& instrument)
-    {
-        const auto s = instrument.toLowerCase();
-        auto has = [&s] (std::initializer_list<const char*> words) { for (auto* w : words) if (s.contains (w)) return true; return false; };
-        if (has ({ "combo organ model f" }))            return Counterpart { "organ", { { "model", 1.0f }, { "rotary", 0.0f }, { "perc", 0.0f } } };
-        if (has ({ "combo organ model v", "combo organ" })) return Counterpart { "organ", { { "model", 2.0f }, { "rotary", 0.0f }, { "perc", 0.0f } } };
-        if (has ({ "vb3", "b3 organ", "tonewheel", "hammond" })) return Counterpart { "organ", {} };
-        if (has ({ "wurli", "reed piano" }))            return Counterpart { "epiano", { { "model", 1.0f } } };
-        if (has ({ "lounge lizard", "rhodes", "electric piano", "e-piano", "epiano" })) return Counterpart { "epiano", {} };
-        if (has ({ "alien 303", "303", "acid" }))       return Counterpart { "acid", { { "seq", 0.0f } } };   // the track's own notes play it
-        if (has ({ "organ" }))                          return Counterpart { "organ", {} };
-        return std::nullopt;
-    }
-    juce::String counterpartState (const Counterpart& c)
-    {
-        auto fx = rs::createBuiltinFx (c.type);
-        if (fx == nullptr) return {};
-        for (auto& [id, v] : c.params) if (auto* p = fx->state.getParameter (id)) p->setValueNotifyingHost (p->convertTo0to1 (v));
-        juce::MemoryBlock mb;
-        fx->getStateInformation (mb);
-        return mb.toBase64Encoding();
-    }
 
     std::vector<NoteIn> notesFromEvents (const Reader& r, const Chunk& c)
     {
@@ -216,6 +183,7 @@ MixcraftImport importMixcraftProject (const juce::File& projectFile, const juce:
     std::vector<TrackIn> tracks;
     double bpm = 0;
     MidiClipIn* openMidiClip = nullptr;
+    bool instrumentListOpen = false;
 
     for (auto& c : chunks)
     {
@@ -226,6 +194,9 @@ MixcraftImport importMixcraftProject (const juce::File& projectFile, const juce:
             if (t.midi)
             {
                 t.instrument = r.str (c.body + 12, 250);
+                t.icon = r.str (c.body + 268, 250);
+                t.category = r.str (c.body + 568, 250);
+                if (t.category.startsWithChar ('<')) t.category = {};   // "<ALL>"
                 t.name = r.str (c.body + 828, 250);
                 if (t.name.isEmpty()) t.name = t.instrument;
             }
@@ -238,6 +209,21 @@ MixcraftImport importMixcraftProject (const juce::File& projectFile, const juce:
             if (! (t.pan >= -1.0 && t.pan <= 1.0)) t.pan = 0.0;
             tracks.push_back (t);
             openMidiClip = nullptr;
+            instrumentListOpen = false;
+        }
+        else if (c.id == "LIST:EisL" && ! tracks.empty() && tracks.back().midi)
+            instrumentListOpen = true;   // the next device is this track's instrument
+        else if (c.id == "EfxD" && instrumentListOpen)
+        {
+            instrumentListOpen = false;
+            auto& t = tracks.back();
+            t.device = r.str (c.body + 88, 200);
+            // VST3 instruments: Mixcraft keeps their settings as JUCE-style XML, which a JUCE host can hand straight back
+            const juce::String body = juce::String::createStringFromData (r.data + c.body, (int) juce::jmin (c.size, (size_t) 4000000));
+            const int x0 = body.indexOf ("<?xml"), x1 = body.indexOf ("</VST3PluginState>");
+            if (x0 >= 0 && x1 > x0)
+                if (auto xml = juce::parseXML (body.substring (x0, x1 + 18)))
+                    juce::AudioProcessor::copyXmlToBinary (*xml, t.deviceState);
         }
         else if (c.id == "ClpA" && ! tracks.empty() && c.size >= 880)
         {
@@ -316,24 +302,18 @@ MixcraftImport importMixcraftProject (const juce::File& projectFile, const juce:
         te->setAttribute ("volume", juce::jlimit (0.0, 1.5, t.volume));
         te->setAttribute ("pan", t.pan);
         te->setAttribute ("mute", t.mute);
-        if (t.midi) te->setAttribute ("preset", presetFor (t.instrument));
-        const auto counterpart = t.midi ? counterpartFor (t.instrument) : std::nullopt;
-        if (counterpart)
+        if (t.midi)
         {
-            auto* ie = te->createNewChildElement ("INSTRUMENT");
-            ie->setAttribute ("type", "builtin:" + counterpart->type);
-            ie->setAttribute ("bypass", false);
-            ie->setAttribute ("state", counterpartState (*counterpart));
-        }
-        else if (t.midi
-            && ((t.instrument + " " + t.name).containsIgnoreCase ("drum") || (t.instrument + " " + t.name).containsIgnoreCase ("kit")
-                || (t.instrument + " " + t.name).containsIgnoreCase ("perc") || (t.instrument + " " + t.name).containsIgnoreCase ("beat")))
-        {
-            // drum kits get RENASOUND Drums (General MIDI notes land on the right pads)
-            auto* ie = te->createNewChildElement ("INSTRUMENT");
-            ie->setAttribute ("type", "builtin:drums");
-            ie->setAttribute ("bypass", false);
-            ie->setAttribute ("state", "");
+            // the closest sound: the same plugin if installed, else from the preset / category / instrument names, else the notes
+            soundmatch::Hints h;
+            h.trackName = t.name; h.preset = t.instrument; h.category = t.category; h.device = t.device; h.icon = t.icon;
+            h.pluginState = t.deviceState;
+            for (auto& m : t.midiClips)
+                for (auto& n : m.notes) h.notes.push_back ({ n.pitch, m.startBeat + n.start, n.length, n.velocity });
+            const auto choice = soundmatch::match (h);
+            soundmatch::applyToTrackXml (choice, *te);
+            result.notes.add ("\"" + name + "\": " + soundmatch::describe (h, choice));
+            ++result.numMatchedSounds;
         }
         ++result.numTracks;
 
@@ -418,8 +398,13 @@ MixcraftImport importMixcraftProject (const juce::File& projectFile, const juce:
 
 juce::String mixcraftCounterpart (const juce::String& name)
 {
-    const auto c = counterpartFor (name);
-    return c ? c->type : juce::String();
+    soundmatch::Hints h;
+    h.device = name;
+    const auto c = soundmatch::match (h);
+    if (c.because == "a default") return {};   // nothing recognised
+    for (auto* t : { "organ", "epiano", "acid", "drums" })
+        if (c.type == juce::String ("builtin:") + t) return t;
+    return {};
 }
 
 } // namespace rs

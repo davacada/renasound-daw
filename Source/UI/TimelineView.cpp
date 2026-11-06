@@ -1,4 +1,5 @@
 #include "TimelineView.h"
+#include "../MidiImport.h"
 #include "DeviceWindow.h"
 #include "InsertList.h"
 
@@ -1383,6 +1384,12 @@ public:
         m.addItem (lock);
         m.addItem ("Rename...", ! many, false, [tv, id] { if (tv) tv->renameClip (id); });
         m.addItem ("Loop this", [tv] { if (tv) tv->loopSelection(); });
+        if (clip->type == Clip::Type::Audio)
+            m.addItem ("Fit to the song's tempo and key", ! many && ! clip->locked, false, [tv, id]
+            {
+                if (! tv || ! tv->ctx.fitClipToSong) return;
+                if (const auto what = tv->ctx.fitClipToSong (id, false); what.isNotEmpty() && tv->ctx.notify) tv->ctx.notify (what);
+            });
         m.addSeparator();
         juce::PopupMenu::Item del ("Delete"); del.shortcutKeyDescription = "Delete"; del.isEnabled = anyUnlocked;
         del.action = [tv] { if (tv) tv->deleteSelection(); };
@@ -1412,7 +1419,9 @@ public:
                     if (fc.getResult().existsAsFile())
                     {
                         owner.ctx.project.beginEdit();
-                        owner.ctx.project.addAudioClip (id, fc.getResult(), beat);
+                        if (auto c = owner.ctx.project.addAudioClip (id, fc.getResult(), beat))
+                            if (owner.ctx.fitClipToSong)
+                                if (const auto what = owner.ctx.fitClipToSong (c->id, true); what.isNotEmpty() && owner.ctx.notify) owner.ctx.notify (what);
                     }
                 });
             });
@@ -1861,6 +1870,7 @@ void TimelineView::importFilesAt (const juce::StringArray& files, int x, int y)
     const auto lp = lanes->getLocalPoint (this, juce::Point<int> (x, y));
     double beat = juce::jmax (0.0, ctx.snapBeat (xToBeat ((float) lp.x), getSnap()));
     int ti = trackIndexAtY (lp.y);
+    juce::StringArray fitted;
 
     p.beginEdit();
     for (auto& path : files)
@@ -1877,9 +1887,15 @@ void TimelineView::importFilesAt (const juce::StringArray& files, int x, int y)
         if (auto c = p.addAudioClip (target->id, f, beat))
         {
             ctx.selectClip (c->id);
+            // a loop is stretched / moved to fit the song (part of the same undo step)
+            if (ctx.fitClipToSong)
+                if (const auto what = ctx.fitClipToSong (c->id, true); what.isNotEmpty()) fitted.add (what);
             ++ti;   // several files go onto consecutive tracks
         }
     }
+    if (! fitted.isEmpty() && ctx.notify)
+        ctx.notify ((fitted.size() > 2 ? fitted.joinIntoString ("\n", 0, 2) + "\n...and " + juce::String (fitted.size() - 2) + " more" : fitted.joinIntoString ("\n"))
+                    + "   (undo to keep the original)");
     dropIndicatorBeat = -1;
     repaint();
 }
@@ -1890,6 +1906,14 @@ void TimelineView::filesDropped (const juce::StringArray& files, int x, int y)
     for (auto& path : files)
     {
         const juce::File f (path);
+        if (isMidiFile (f) && ctx.addMidiFile)
+        {
+            // a MIDI file: its parts come in as instrument tracks, at the bar it was dropped on
+            const auto lp = lanes->getLocalPoint (this, juce::Point<int> (x, y));
+            const double beat = juce::jmax (0.0, std::floor (xToBeat ((float) lp.x) / ctx.project.beatsPerBar) * ctx.project.beatsPerBar);
+            ctx.addMidiFile (f, beat);
+            return;
+        }
         if ((f.hasFileExtension ("renasound") || f.hasFileExtension ("als") || f.getFileExtension().toLowerCase().startsWith (".mx")) && ctx.openProjectFile)
         {
             ctx.openProjectFile (f);

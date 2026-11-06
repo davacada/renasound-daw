@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(Renasound VERSION 0.14.2 LANGUAGES C CXX)
+project(Renasound VERSION 0.15.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -87,6 +87,9 @@ target_sources(Renasound PRIVATE
     Source/Pitch.cpp
     Source/Drums.cpp
     Source/MixcraftImport.cpp
+    Source/SoundMatch.cpp
+    Source/MidiImport.cpp
+    Source/AudioFit.cpp
     Source/AbletonImport.cpp
     Source/AudioEngine.cpp
     Source/MainComponent.cpp
@@ -119,7 +122,7 @@ option(RENASOUND_TESTS "Build the headless render test" OFF)
 if(RENASOUND_TESTS)
     juce_add_console_app(RenderTest PRODUCT_NAME "RenderTest")
     juce_generate_juce_header(RenderTest)
-    target_sources(RenderTest PRIVATE Tests/RenderTest.cpp Source/Model.cpp Source/Effects.cpp Source/StudioEq.cpp Source/Devices.cpp Source/Faceplates.cpp Source/ClipOps.cpp Source/SynthFx.cpp Source/Fx2.cpp Source/Fx3.cpp Source/MultiSampler.cpp Source/Keys.cpp Source/Fx4.cpp Source/Export.cpp Source/Pitch.cpp Source/Drums.cpp Source/MixcraftImport.cpp Source/AbletonImport.cpp Source/AudioEngine.cpp)
+    target_sources(RenderTest PRIVATE Tests/RenderTest.cpp Source/Model.cpp Source/Effects.cpp Source/StudioEq.cpp Source/Devices.cpp Source/Faceplates.cpp Source/ClipOps.cpp Source/SynthFx.cpp Source/Fx2.cpp Source/Fx3.cpp Source/MultiSampler.cpp Source/Keys.cpp Source/Fx4.cpp Source/Export.cpp Source/Pitch.cpp Source/Drums.cpp Source/MixcraftImport.cpp Source/SoundMatch.cpp Source/MidiImport.cpp Source/AudioFit.cpp Source/AbletonImport.cpp Source/AudioEngine.cpp)
     target_include_directories(RenderTest PRIVATE Source)
     target_compile_definitions(RenderTest PRIVATE ${RENASOUND_DEFINITIONS})
     target_link_libraries(RenderTest PRIVATE ${RENASOUND_MODULES} juce::juce_recommended_config_flags)

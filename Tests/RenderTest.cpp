@@ -4,6 +4,9 @@
 #include "../Source/AudioEngine.h"
 #include "../Source/Pitch.h"
 #include "../Source/MixcraftImport.h"
+#include "../Source/MidiImport.h"
+#include "../Source/AudioFit.h"
+#include "../Source/SoundMatch.h"
 #include "../Source/AbletonImport.h"
 #include "../Source/Drums.h"
 #include "../Source/ClipOps.h"
@@ -1033,7 +1036,7 @@ int main (int argc, char** argv)
         // Mixcraft's instruments find their RENASOUND counterparts
         for (auto [name, want] : { std::pair<const char*, const char*> { "VB3 Organ", "organ" }, { "Combo Organ Model F", "organ" }, { "Combo Organ Model V", "organ" },
                                    { "Lounge Lizard Electric Piano", "epiano" }, { "Alien 303 Bass Synthesizer", "acid" }, { "Messiah Version 2", "" },
-                                   { "MinimogueVA", "" }, { "Acoustica Studio Drums", "" } })
+                                   { "MinimogueVA", "" }, { "Acoustica Studio Drums", "drums" } })
         {
             const auto got = rs::mixcraftCounterpart (name);
             std::cout << "mixcraft \"" << name << "\" -> " << (got.isEmpty() ? juce::String ("(RENASYNTH / drums)") : got) << "\n";
@@ -1743,6 +1746,265 @@ int main (int argc, char** argv)
                       << ", 2nd harmonic (loud) " << h2l << " dB\n";
         }
         return 0;
+    }
+
+    // RenderTest --match [gm.sf2] [mixcraft projects...]: sound matching from names, notes, MIDI files
+    // RenderTest --fit [audio files...]: tempo / key detection and stretching
+    if (argc >= 2 && juce::String (argv[1]) == "--fit")
+    {
+        juce::ScopedJuceInitialiser_GUI gui;
+        namespace af = rs::audiofit;
+        bool ok = true;
+        auto expect = [&ok] (const juce::String& what, bool cond) { std::cout << (cond ? "  ok   " : "  FAIL ") << what << "\n"; ok = ok && cond; };
+
+        // names
+        bool mn = false;
+        expect ("bpm from 'Funky Loop 120bpm Am'", af::bpmFromName ("Funky Loop 120bpm Am") == 120);
+        expect ("bpm from '128_BPM_Bass'", af::bpmFromName ("128_BPM_Bass") == 128);
+        expect ("bpm from 'bpm95 groove'", af::bpmFromName ("bpm95 groove") == 95);
+        expect ("no bpm in 'Drum Loop'", af::bpmFromName ("Drum Loop") == 0);
+        expect ("key from 'Funky Loop 120bpm Am'", af::keyFromName ("Funky Loop 120bpm Am", mn) == 9 && mn);
+        expect ("key from 'Pad_C#min_90'", af::keyFromName ("Pad_C#min_90", mn) == 1 && mn);
+        expect ("key from 'Keys Gbmaj'", af::keyFromName ("Keys Gbmaj", mn) == 6 && ! mn);
+        expect ("key from 'Strings F minor'", af::keyFromName ("Strings F minor", mn) == 5 && mn);
+        expect ("no key in 'Bass Drum Big'", af::keyFromName ("Bass Drum Big", mn) == -1);
+        expect ("no key in 'Acoustic Guitar'", af::keyFromName ("Acoustic Guitar", mn) == -1);
+        expect ("A minor -> C major song: 0 (same notes)", af::semitonesBetween (9, true, 0, false) == 0);
+        expect ("A minor -> C minor song: +3", af::semitonesBetween (9, true, 0, true) == 3);
+        expect ("E major -> D major: -2", af::semitonesBetween (4, false, 2, false) == -2);
+
+        // a made-up loop: 2 bars at 100 BPM, kick / hat / snare and an A minor chord pattern
+        const double sr = 44100, bpm = 100;
+        const int len = (int) std::round (8 * 60.0 / bpm * sr);
+        rs::AudioData loop; loop.sampleRate = sr; loop.buffer.setSize (2, len); loop.buffer.clear();
+        auto add = [&] (int at, std::function<float (double)> f, double dur)
+        {
+            for (int i = 0; i < (int) (dur * sr) && at + i < len; ++i) { const float v = f (i / sr); loop.buffer.addSample (0, at + i, v); loop.buffer.addSample (1, at + i, v); }
+        };
+        juce::Random rnd (3);
+        for (int b = 0; b < 16; ++b)
+        {
+            const int at = (int) std::round (b * 0.5 * 60.0 / bpm * sr);
+            add (at, [&] (double t) { return 0.15f * (rnd.nextFloat() * 2 - 1) * (float) std::exp (-t * 60); }, 0.08);   // hat
+            if (b % 4 == 0) add (at, [] (double t) { return 0.8f * (float) (std::sin (2 * M_PI * (50 + 100 * std::exp (-t * 25)) * t) * std::exp (-t * 8)); }, 0.4);
+            if (b % 4 == 2) add (at, [&] (double t) { return 0.4f * (rnd.nextFloat() * 2 - 1) * (float) std::exp (-t * 18); }, 0.2);
+        }
+        for (int bar = 0; bar < 2; ++bar)
+            for (int chord = 0; chord < 2; ++chord)
+            {
+                const int at = (int) std::round ((bar * 4 + chord * 2) * 60.0 / bpm * sr);
+                static const std::vector<int> chords[4] = { { 45, 57, 60, 64, 69 }, { 50, 57, 62, 65, 69 }, { 45, 57, 60, 64, 69 }, { 40, 56, 59, 64, 68 } };   // Am Dm Am E
+                const auto notes = chords[bar * 2 + chord];
+                add (at, [notes] (double t) { float v = 0; for (int n : notes) v += (float) std::sin (2 * M_PI * 440.0 * std::pow (2.0, (n - 69) / 12.0) * t); return 0.06f * v * (float) std::exp (-t * 0.6); }, 2 * 60.0 / bpm);
+            }
+        const auto an = af::analyse (loop, "My Loop");
+        std::cout << "  detected " << an.bpm << " BPM (confidence " << an.tempoConfidence << "), loop " << an.isLoop << " (" << an.bars << " bars), key "
+                  << af::keyName (an.key, an.minor) << " (" << an.keyConfidence << ")\n";
+        expect ("tempo 100", std::abs (an.bpm - 100.0) < 0.5);
+        expect ("a 2-bar loop", an.isLoop && an.bars == 2);
+        expect ("A minor", an.key == 9 && an.minor);
+
+        // stretch to 120 BPM and up 3 semitones: a 440 Hz tone becomes 523 Hz, the loop 2 bars at 120
+        rs::AudioData tone; tone.sampleRate = sr; tone.buffer.setSize (2, (int) sr * 2);
+        for (int i = 0; i < tone.buffer.getNumSamples(); ++i) { const float v = 0.5f * (float) std::sin (2 * M_PI * 440.0 * i / sr); tone.buffer.setSample (0, i, v); tone.buffer.setSample (1, i, v); }
+        const auto t0 = juce::Time::getMillisecondCounterHiRes();
+        auto st = af::render (tone, 100.0 / 120.0, 3.0);
+        const auto ms = juce::Time::getMillisecondCounterHiRes() - t0;
+        if (st != nullptr)
+        {
+            const double hz = rs::msamp::detectPitchHz (st->buffer, sr);
+            std::cout << "  stretched tone: " << st->getLengthSeconds() << " s (want " << 2.0 * 100 / 120 << "), " << hz << " Hz (want 523.3), " << ms << " ms\n";
+            expect ("length scaled", std::abs (st->getLengthSeconds() - 2.0 * 100 / 120) < 0.002);
+            expect ("pitch +3 semitones", std::abs (1200 * std::log2 (hz / 523.25)) < 8);
+            // the stretched level stays steady (no WSOLA gaps)
+            float mn = 1e9f, mx = 0;
+            for (int b = 4; b < 30; ++b) { const float r = st->buffer.getRMSLevel (0, b * 2048, 2048); mn = std::min (mn, r); mx = std::max (mx, r); }
+            expect ("steady level after stretching (" + juce::String (mn, 3) + " .. " + juce::String (mx, 3) + ")", mn > 0.3f && mx < 0.4f);
+        }
+        auto fitted = af::render (loop, 100.0 / 120.0, 0.0);
+        if (fitted != nullptr)
+        {
+            const auto an2 = af::analyse (*fitted, "");
+            std::cout << "  the loop at 120: " << an2.bpm << " BPM, " << fitted->getLengthSeconds() << " s\n";
+            expect ("stretched loop reads as 120", std::abs (an2.bpm - 120.0) < 0.6);
+        }
+
+        // planning against a song
+        {
+            rs::AudioCache cache; rs::Project project (cache);
+            project.bpm = 120;
+            bool adopt = false;
+            auto f0 = af::plan (an, project, adopt, true);
+            expect ("empty song adopts the loop's tempo", adopt && ! f0.tempo);
+            auto t = project.addTrack (rs::Track::Type::Instrument);
+            auto c = project.addMidiClip (t->id, 0, 8);
+            for (int i = 0; i < 8; ++i) for (int n : { 60, 63, 67 }) c->notes.push_back ({ n + (i % 2 ? 5 : 0), i * 1.0, 1.0, 0.8f });   // C minor-ish
+            auto f1 = af::plan (an, project, adopt, true);
+            std::cout << "  plan: " << f1.description << "\n";
+            expect ("loop stretched to the song's 120", ! adopt && f1.tempo && std::abs (f1.stretch - 100.0 / 120.0) < 1e-6);
+            expect ("and moved to C minor (+3)", f1.key && f1.semitones == 3);
+        }
+
+        for (int i = 2; i < argc; ++i)
+        {
+            rs::AudioCache cache;
+            if (auto d = cache.load (juce::File (argv[i])))
+            {
+                const auto t1 = juce::Time::getMillisecondCounterHiRes();
+                const auto a = af::analyse (*d, juce::File (argv[i]).getFileNameWithoutExtension());
+                std::cout << "  " << juce::File (argv[i]).getFileName() << ": " << a.bpm << " BPM (" << a.tempoConfidence << (a.tempoFromName ? ", from name" : "") << "), loop "
+                          << a.isLoop << " " << a.bars << " bars, key " << af::keyName (a.key, a.minor) << " (" << a.keyConfidence << "), "
+                          << (juce::Time::getMillisecondCounterHiRes() - t1) << " ms\n";
+            }
+        }
+        std::cout << (ok ? "FIT OK\n" : "FIT FAILED\n");
+        return ok ? 0 : 1;
+    }
+
+    if (argc >= 2 && juce::String (argv[1]) == "--match")
+    {
+        juce::ScopedJuceInitialiser_GUI gui;
+        namespace sm = rs::soundmatch;
+        bool ok = true;
+        auto expect = [&ok] (const juce::String& what, bool cond) { std::cout << (cond ? "  ok   " : "  FAIL ") << what << "\n"; ok = ok && cond; };
+
+        // ---- names ----
+        struct T { const char* text; int gm; };
+        for (auto t : { T { "Acoustic Piano", 0 }, T { "Grand Piano", 0 }, T { "Sub Bass", 39 }, T { "Fretless Bass", 35 }, T { "Bassoon", 70 },
+                        T { "Warm Strings", 48 }, T { "String Ensemble", 48 }, T { "Guzheng Height", 107 }, T { "Drum Machine Kit 1", 128 },
+                        T { "Percussion - Drum Kits", 128 }, T { "Rhodes Mk1", 4 }, T { "Alien 303", 38 }, T { "Choir Aahs", 52 },
+                        T { "Alto Sax", 65 }, T { "Church Organ", 19 }, T { "Nylon Guitar", 24 }, T { "Big Supersaw Lead", 90 },
+                        T { "Nightlife", -1 }, T { "MIDI 3", -1 }, T { "Bass Drum", 128 } })
+        {
+            const int g = sm::gmFromText (t.text);
+            expect (juce::String (t.text) + " -> " + (g >= 0 ? sm::gmName (g) : "(nothing)"), g == t.gm);
+        }
+
+        // ---- notes ----
+        std::vector<sm::NoteInfo> bass, pad, lead, drums, keys, bassInDrumRange;
+        for (int i = 0; i < 32; ++i) bass.push_back ({ 36 + (i % 4) * 2, i * 0.5, 0.45, 0.8f });
+        for (int i = 0; i < 8; ++i) for (int k : { 60, 64, 67, 71 }) pad.push_back ({ k, i * 4.0, 3.9, 0.6f });
+        for (int i = 0; i < 32; ++i) lead.push_back ({ 72 + (i % 5), i * 0.5, 0.45, 0.8f });
+        for (int i = 0; i < 16; ++i) { drums.push_back ({ 42, i * 0.5, 0.1, 0.7f }); if (i % 4 == 0) drums.push_back ({ 36, i * 0.5, 0.1, 1.0f }); if (i % 4 == 2) drums.push_back ({ 38, i * 0.5, 0.1, 1.0f }); }
+        for (int i = 0; i < 16; ++i) for (int k : { 60, 64, 67 }) keys.push_back ({ k + (i % 3), i * 1.0, 0.5, 0.7f });
+        for (int i = 0; i < 32; ++i) bassInDrumRange.push_back ({ 36 + (i % 3) * 2 + (i % 5 == 0 ? 6 : 0), i * 0.25, 0.2, 0.8f });
+        expect ("bass line -> " + juce::String (sm::gmName (sm::gmFromNotes (bass))), sm::gmFromNotes (bass) == 33 || sm::gmFromNotes (bass) == 38);
+        expect ("long chords -> " + juce::String (sm::gmName (sm::gmFromNotes (pad))), sm::gmFromNotes (pad) == 89);
+        expect ("high single notes -> " + juce::String (sm::gmName (sm::gmFromNotes (lead))), sm::gmFromNotes (lead) == 81);
+        expect ("drum pattern -> " + juce::String (sm::gmName (sm::gmFromNotes (drums))), sm::gmFromNotes (drums) == 128);
+        expect ("short chords -> " + juce::String (sm::gmName (sm::gmFromNotes (keys))), sm::gmFromNotes (keys) == 0);
+        expect ("busy bass in the drum range isn't drums", ! sm::notesLookLikeDrums (bassInDrumRange));
+
+        // ---- choices without a SoundFont ----
+        auto choose = [] (const char* preset, std::vector<sm::NoteInfo> notes = {}, int gm = -1, bool gmDrums = false)
+        {
+            sm::Hints h; h.preset = preset; h.notes = std::move (notes); h.gmProgram = gm; h.gmDrums = gmDrums;
+            const auto c = sm::match (h);
+            std::cout << "    " << sm::describe (h, c) << "  [" << (c.type.isEmpty() ? juce::String ("synth patch ") + juce::String (c.synthPatch) : c.type) << "]\n";
+            return c;
+        };
+        sm::setGmSoundFont ({});
+        expect ("piano -> Electric Piano device", choose ("Acoustic Piano").type == "builtin:epiano");
+        expect ("drum kit -> RENASOUND Drums", choose ("Drum Machine Kit 1").type == "builtin:drums");
+        expect ("sub bass -> RENASYNTH Sub Bass", choose ("Sub Bass").synthPatch == 6);
+        expect ("guzheng -> Pluck", choose ("Guzheng Height").synthPatch == 2);
+        expect ("Alien 303 -> Acid Bass", choose ("Alien 303").type == "builtin:acid");
+        expect ("church organ -> Organ", choose ("Church Organ").type == "builtin:organ");
+        expect ("unknown preset playing chords -> Soft Pad", choose ("Nightlife", pad).synthPatch == 1);
+        expect ("unknown preset playing a drum beat -> drums", choose ("Nightlife", drums).type == "builtin:drums");
+        expect ("GM program 48 -> Warm Strings", choose ("", {}, 48).synthPatch == 11);
+        expect ("GM drum channel -> drums", choose ("", {}, -1, true).type == "builtin:drums");
+
+        // ---- installed plugin ----
+        {
+            juce::PluginDescription d; d.name = "Nightlife"; d.isInstrument = true; d.pluginFormatName = "VST3"; d.fileOrIdentifier = "/x/Nightlife.vst3";
+            sm::setInstalledPlugins ({ d });
+            expect ("installed plugin is used", [&] { sm::Hints h; h.device = "Nightlife"; h.preset = "Nightlife"; return sm::match (h).type == "plugin"; }());
+            sm::setInstalledPlugins ({});
+        }
+
+        // ---- a MIDI file ----
+        {
+            juce::MidiFile mf; mf.setTicksPerQuarterNote (480);
+            juce::MidiMessageSequence meta; meta.addEvent (juce::MidiMessage::tempoMetaEvent (500000 * 120 / 96), 0); meta.addEvent (juce::MidiMessage::timeSignatureMetaEvent (4, 4), 0);
+            mf.addTrack (meta);
+            auto part = [&] (const char* name, int ch, int program, const std::vector<sm::NoteInfo>& notes)
+            {
+                juce::MidiMessageSequence q;
+                q.addEvent (juce::MidiMessage::textMetaEvent (3, name), 0);
+                if (program >= 0) q.addEvent (juce::MidiMessage::programChange (ch, program), 0);
+                for (auto& n : notes)
+                {
+                    q.addEvent (juce::MidiMessage::noteOn (ch, n.pitch, n.velocity), (4.0 + n.start) * 480);
+                    q.addEvent (juce::MidiMessage::noteOff (ch, n.pitch), (4.0 + n.start + n.length) * 480);
+                }
+                q.updateMatchedPairs();
+                mf.addTrack (q);
+            };
+            part ("Piano", 1, 0, keys); part ("Bass", 2, 33, bass); part ("Strings", 3, 48, pad); part ("Drums", 10, -1, drums); part ("Track 5", 4, -1, lead);
+            auto f = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("rs-match-test.mid");
+            { f.deleteFile(); juce::FileOutputStream out (f); mf.writeTo (out); }
+            expect ("is a MIDI file", rs::isMidiFile (f));
+            auto imp = rs::importMidiFile (f);
+            std::cout << "  midi import ok=" << imp.ok << " " << imp.error << " | " << imp.summary << "\n";
+            for (auto& n : imp.notes) std::cout << "    " << n << "\n";
+            expect ("5 tracks at 96 BPM", imp.ok && imp.numTracks == 5 && std::abs (imp.bpm - 96.0) < 0.01);
+            if (imp.ok)
+            {
+                rs::AudioCache cache; rs::Project project (cache); rs::AudioEngine engine (project);
+                project.fromXml (*imp.project);
+                juce::StringArray kinds;
+                for (auto& t : project.tracks)
+                    kinds.add (t->name + "=" + (t->instrument != nullptr && t->instrument->processor != nullptr ? t->instrument->processor->getName() : juce::String ("?")));
+                std::cout << "  loaded: " << kinds.joinIntoString (", ") << "\n";
+                expect ("clip starts on bar 2", project.tracks.size() == 5 && std::abs (project.tracks[0]->clips[0]->startBeat - 4.0) < 1e-6);
+                expect ("drums track got drums", project.tracks.size() == 5 && project.tracks[3]->instrument != nullptr
+                        && project.tracks[3]->instrument->type == "builtin:drums");
+                juce::String err;
+                auto wav = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("rs-match-test.wav");
+                const bool r = engine.renderToFile (wav, err);
+                std::unique_ptr<juce::AudioFormatReader> rd (cache.formats.createReaderFor (wav));
+                if (r && rd != nullptr)
+                {
+                    juce::AudioBuffer<float> b (2, (int) rd->lengthInSamples);
+                    rd->read (&b, 0, (int) rd->lengthInSamples, 0, true, true);
+                    std::cout << "  rendered " << rd->lengthInSamples / rd->sampleRate << " s, rms " << b.getRMSLevel (0, 0, b.getNumSamples()) << "\n";
+                    expect ("MIDI file plays", b.getRMSLevel (0, 0, b.getNumSamples()) > 0.01);
+                }
+                // merging into a song
+                auto xml = project.toXml();
+                int id = 5000;
+                const int added = rs::appendImportedTracks (*xml, *imp.project, 8.0, id);
+                project.fromXml (*xml);
+                expect ("merged: 10 tracks, new clips 8 beats later", added == 5 && project.tracks.size() == 10
+                        && std::abs (project.tracks[5]->clips[0]->startBeat - 12.0) < 1e-6);
+            }
+        }
+
+        // ---- with a General MIDI SoundFont ----
+        if (argc >= 3 && juce::File (argv[2]).hasFileExtension ("sf2"))
+        {
+            const juce::File font (argv[2]);
+            std::cout << "  " << font.getFileName() << " is a General MIDI bank: " << (sm::isGeneralMidiBank (font) ? "yes" : "no") << "\n";
+            sm::setGmSoundFont (font);
+            const auto piano = choose ("Acoustic Piano");
+            expect ("piano -> SoundFont piano", piano.type == "builtin:multisampler");
+            expect ("organ still -> RENASOUND Organ", choose ("Church Organ").type == "builtin:organ");
+            const auto kit = choose ("", {}, -1, true);
+            expect ("drums -> SoundFont kit", kit.type == "builtin:multisampler");
+            sm::setGmSoundFont ({});
+        }
+
+        // ---- real Mixcraft projects ----
+        for (int i = 3; i < argc; ++i)
+        {
+            auto imp = rs::importMixcraftProject (juce::File (argv[i]));
+            std::cout << "  " << juce::File (argv[i]).getFileName() << ": " << imp.summary << "\n";
+            for (auto& n : imp.notes) std::cout << "    " << n << "\n";
+            expect ("every instrument track matched", imp.ok && (imp.numMatchedSounds > 0 || imp.numMidiClips == 0));
+        }
+        std::cout << (ok ? "MATCH OK\n" : "MATCH FAILED\n");
+        return ok ? 0 : 1;
     }
 
     if (argc >= 4 && juce::String (argv[1]) == "--mixcraft")

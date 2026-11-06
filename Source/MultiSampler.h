@@ -64,6 +64,8 @@ InstrumentPtr mapFiles (const juce::Array<juce::File>& files, const juce::File& 
 InstrumentPtr loadFolder (const juce::File& folder, std::atomic<float>* progress, juce::String& error);
 InstrumentPtr loadSfz (const juce::File& sfz, std::atomic<float>* progress, juce::String& error);
 InstrumentPtr loadSf2 (const juce::File& sf2, int presetIndex, std::atomic<float>* progress, juce::String& error);
+struct Sf2PresetInfo { int bank = 0, program = 0; juce::String name; };
+std::vector<Sf2PresetInfo> sf2PresetList (const juce::File& sf2);   // in the order the preset menu shows them (bank, then program)
 InstrumentPtr load (const juce::File& fileOrFolder, std::atomic<float>* progress, juce::String& error, int sf2Preset = 0);
 
 // what a file name says about a sample (for the mapper, and for tests)

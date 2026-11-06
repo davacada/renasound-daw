@@ -343,12 +343,12 @@ public:
         else if (drag == Drag::Move)
         {
             const auto& a = originals[(size_t) (std::find (selection.begin(), selection.end(), anchor) - selection.begin())];
-            const double moved = owner.ctx.snapBeat (a.start + delta, s) - a.start;
+            const double shiftBy = owner.ctx.snapBeat (a.start + delta, s) - a.start;
             const int dp = yToPitch (e.y) - a.pitch;
             for (size_t k = 0; k < selection.size(); ++k)
             {
                 auto& n = notes[(size_t) selection[k]];
-                n.start = juce::jlimit (0.0, owner.clip->lengthBeats - 0.01, originals[k].start + moved);
+                n.start = juce::jlimit (0.0, owner.clip->lengthBeats - 0.01, originals[k].start + shiftBy);
                 const int np = juce::jlimit (0, 127, originals[k].pitch + dp);
                 if (selection[k] == anchor && np != n.pitch) audition (np);
                 n.pitch = np;
@@ -367,12 +367,12 @@ public:
         else if (drag == Drag::ResizeLeft)
         {
             const auto& a = originals[(size_t) (std::find (selection.begin(), selection.end(), anchor) - selection.begin())];
-            const double moved = owner.ctx.snapBeat (a.start + delta, s) - a.start;
+            const double shiftBy = owner.ctx.snapBeat (a.start + delta, s) - a.start;
             for (size_t k = 0; k < selection.size(); ++k)
             {
                 const auto& o = originals[k];
                 const double minLen = s > 0 ? s : 0.03;
-                const double ns = juce::jlimit (0.0, o.start + o.length - minLen, o.start + moved);
+                const double ns = juce::jlimit (0.0, o.start + o.length - minLen, o.start + shiftBy);
                 notes[(size_t) selection[k]].start = ns;
                 notes[(size_t) selection[k]].length = o.start + o.length - ns;
             }

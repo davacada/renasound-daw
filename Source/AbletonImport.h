@@ -10,10 +10,12 @@
 //      and audio offsets worked out through Live's warp markers
 //    - if the arrangement is empty, the Session view's scenes are laid out
 //      one after another so nothing is lost
-//    - Drum Racks, Impulse and drum-named tracks become RENASOUND Drums
+//    - Simpler, Sampler and Drum Rack samples: the same samples, mapped the
+//      same way, played by the Multi Sampler (Live's own synths get the closest
+//      RENASOUND sound, see SoundMatch.h)
 //    - track volume and pan automation
-//  What can't: Live's devices (instruments / effects), device automation, and
-//  time-stretching (warped audio plays at its original speed).
+//  What can't: Live's effects, device automation, and warping (warped audio
+//  comes in at its original speed; "Fit to the song" stretches it).
 // =============================================================================
 
 namespace rs

@@ -1,4 +1,5 @@
 #include "AbletonImport.h"
+#include "SoundMatch.h"
 #include "Model.h"
 
 namespace rs
@@ -263,18 +264,64 @@ namespace
         return {};
     }
 
-    int presetFor (const juce::String& text)
+    // Live's Simpler / Sampler / Drum Rack samples, as an SFZ instrument the Multi Sampler plays.
+    // Returns the number of regions written (0 = no samples found, nothing written).
+    struct SfzBuild { juce::String text; int regions = 0; bool drums = false; };
+    void collectSampleParts (const juce::XmlElement* e, int drumNote, const juce::File& projectDir, const FileFinder& finder, SfzBuild& out, int depth = 0)
     {
-        const auto s = text.toLowerCase();
-        auto has = [&s] (std::initializer_list<const char*> words) { for (auto* w : words) if (s.contains (w)) return true; return false; };
-        if (has ({ "sub" }))                                       return 6;
-        if (has ({ "bass" }))                                      return 3;
-        if (has ({ "piano", "rhodes", "keys", "organ", "electric" })) return 4;
-        if (has ({ "pad", "string", "choir", "warm", "atmo" }))     return 1;
-        if (has ({ "pluck", "harp", "guitar", "arp", "bell" }))     return 2;
-        if (has ({ "square", "chip" }))                             return 5;
-        return 0;
+        if (e == nullptr || depth > 40) return;
+        if (e->getTagName() == "DrumBranch")
+        {
+            const int rn = (int) number (e, "BranchInfo/ReceivingNote", -1);
+            if (rn >= 0 && rn <= 128) { drumNote = 128 - rn; out.drums = true; }   // Live stores pads counted down from 128
+        }
+        if (e->getTagName() == "MultiSamplePart")
+        {
+            juce::String name;
+            const auto f = resolveSample (child (e, "SampleRef/FileRef"), projectDir, finder, name);
+            if (! f.existsAsFile()) return;
+            auto& t = out.text;
+            t << "<region> sample=" << f.getFullPathName();
+            const double vol = number (e, "Volume", 1.0), pan = number (e, "Panorama", 0.0);
+            if (drumNote >= 0)
+                t << " key=" << drumNote << " pitch_keycenter=" << drumNote << " loop_mode=one_shot";
+            else
+            {
+                t << " lokey=" << (int) number (e, "KeyRange/Min", 0) << " hikey=" << (int) number (e, "KeyRange/Max", 127)
+                  << " pitch_keycenter=" << (int) number (e, "RootKey", 60);
+                const int loopMode = (int) number (e, "SustainLoop/Mode", 0);
+                if (loopMode == 1 || loopMode == 2)
+                    t << " loop_mode=loop_continuous loop_start=" << (juce::int64) number (e, "SustainLoop/Start", 0)
+                      << " loop_end=" << (juce::int64) number (e, "SustainLoop/End", 0);
+            }
+            t << " lovel=" << (int) number (e, "VelocityRange/Min", 1) << " hivel=" << (int) number (e, "VelocityRange/Max", 127);
+            if (const double det = number (e, "Detune", 0); std::abs (det) > 0.01) t << " tune=" << juce::roundToInt (det);
+            if (vol > 0 && std::abs (vol - 1.0) > 0.001) t << " volume=" << juce::String (juce::Decibels::gainToDecibels (vol), 2);
+            if (std::abs (pan) > 0.001) t << " pan=" << juce::roundToInt (pan * 100.0);
+            if (const auto st = (juce::int64) number (e, "SampleStart", 0); st > 0) t << " offset=" << st;
+            if (const auto en = (juce::int64) number (e, "SampleEnd", 0); en > 0) t << " end=" << en;
+            t << "\n";
+            ++out.regions;
+            return;
+        }
+        for (auto* c : e->getChildIterator()) collectSampleParts (c, drumNote, projectDir, finder, out, depth + 1);
     }
+
+    juce::File writeSamplerSfz (const juce::XmlElement* track, const juce::File& projectDir, const FileFinder& finder,
+                                const juce::String& setName, const juce::String& trackName, int index, bool& isDrums)
+    {
+        SfzBuild b;
+        collectSampleParts (child (track, "DeviceChain/DeviceChain/Devices"), -1, projectDir, finder, b);
+        isDrums = b.drums;
+        if (b.regions == 0) return {};
+        auto dir = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+                       .getChildFile ("RENASOUND").getChildFile ("Imported Instruments").getChildFile (juce::File::createLegalFileName (setName));
+        dir.createDirectory();
+        auto f = dir.getChildFile (juce::String (index).paddedLeft ('0', 2) + " " + juce::File::createLegalFileName (trackName) + ".sfz");
+        if (! f.replaceWithText ("// made by RENASOUND from the Ableton Live set \"" + setName + "\"\n" + b.text)) return {};
+        return f;
+    }
+
 }
 
 bool isAbletonProject (const juce::File& f)
@@ -372,6 +419,8 @@ DawImport importAbletonProject (const juce::File& file, const juce::Array<juce::
     int nextId = 1;
     std::set<juce::String> missing;
     bool anyWarpedTempoMismatch = false;
+    struct InstrumentTrack { juce::XmlElement* te; const juce::XmlElement* track; juce::String name; bool drums; };
+    std::vector<InstrumentTrack> instruments;
 
     for (auto* t : tracksXml->getChildIterator())
     {
@@ -407,16 +456,7 @@ DawImport importAbletonProject (const juce::File& file, const juce::Array<juce::
         const bool drums = ! isAudio && (hasDevice (t, "DrumGroupDevice") || impulse || nameSaysDrums (name));
         const bool kickOnly = drums && ! impulse && ! hasDevice (t, "DrumGroupDevice") && nameSaysKickOnly (name);
         if (! isAudio)
-        {
-            te->setAttribute ("preset", presetFor (name + " " + instrumentName (t)));
-            if (drums)
-            {
-                auto* ie = te->createNewChildElement ("INSTRUMENT");
-                ie->setAttribute ("type", "builtin:drums");
-                ie->setAttribute ("bypass", false);
-                ie->setAttribute ("state", "");
-            }
-        }
+            instruments.push_back ({ te, t, name, drums });
 
         for (auto& ref : clips)
         {
@@ -505,8 +545,36 @@ DawImport importAbletonProject (const juce::File& file, const juce::Array<juce::
         }
     }
 
+    // ---- give every instrument track its closest sound, now that its notes are known ----
+    int instIndex = 0;
+    for (auto& inst : instruments)
+    {
+        soundmatch::Hints h;
+        h.trackName = inst.name;
+        h.device = instrumentName (inst.track);
+        for (auto* ce : inst.te->getChildWithTagNameIterator ("CLIP"))
+            for (auto* ne : ce->getChildWithTagNameIterator ("NOTE"))
+                h.notes.push_back ({ ne->getIntAttribute ("p"), ce->getDoubleAttribute ("start") + ne->getDoubleAttribute ("s"),
+                                     ne->getDoubleAttribute ("l"), (float) ne->getDoubleAttribute ("v") });
+
+        // Simpler, Sampler and Drum Rack samples: the very same sounds, played by the Multi Sampler
+        bool sampledDrums = false;
+        const auto sfz = writeSamplerSfz (inst.track, projectDir, finder, file.getFileNameWithoutExtension(), inst.name, ++instIndex, sampledDrums);
+        soundmatch::Choice choice;
+        if (sfz.existsAsFile())
+            choice = soundmatch::multiSamplerFrom (sfz, 0, sampledDrums ? "its Drum Rack samples" : "its own samples");
+        else
+        {
+            h.gmDrums = inst.drums;
+            choice = soundmatch::match (h);
+        }
+        soundmatch::applyToTrackXml (choice, *inst.te);
+        result.notes.add ("\"" + inst.name + "\": " + soundmatch::describe (h, choice));
+        ++result.numMatchedSounds;
+    }
+
     if (anyWarpedTempoMismatch)
-        result.notes.add ("Some audio was warped to a different tempo in Live. RENASOUND doesn't time-stretch yet, so those clips play at their original speed.");
+        result.notes.add ("Some audio was warped to a different tempo in Live. Those clips come in at their original speed: right-click one and choose \"Fit to the song's tempo and key\" to stretch it.");
 
     for (auto& m : missing) result.missingFiles.add (m);
     result.project = std::move (root);

@@ -1,4 +1,7 @@
 #include "MainComponent.h"
+#include "AudioFit.h"
+#include "SoundMatch.h"
+#include "MidiImport.h"
 #include "UI/MixdownPanel.h"
 #include "Devices.h"
 
@@ -190,9 +193,20 @@ MainComponent::MainComponent()
     ctx.openDevice = [this] (int id, FxPtr slot, bool instrument) { openDevice (id, std::move (slot), instrument); };
     ctx.showInMixer = [this] (int id) { showInMixer (id); };
     ctx.openPluginManager = [this] { openPluginManager(); };
+    ctx.addMidiFile = [this] (const juce::File& f, double beat) { addMidiFile (f, beat); };
+    ctx.fitClipToSong = [this] (int clipId, bool automatic) { return fitClipToSong (clipId, automatic); };
+    ctx.notify = [this] (const juce::String& t) { notice.show (t); resized(); };
+    addChildComponent (notice);
+    // sound matching for imports: the General MIDI SoundFont the user has (remembered between runs)
+    soundmatch::setGmSoundFont (juce::File (engine.pluginHost.settings->getValue ("gmSoundFont")));
+    soundmatch::onGmSoundFontChanged = [this] (const juce::File& f)
+    {
+        engine.pluginHost.settings->setValue ("gmSoundFont", f.getFullPathName());
+        engine.pluginHost.settings->saveIfNeeded();
+    };
     ctx.openProjectFile = [this] (const juce::File& f)
     {
-        askToSaveThen ([this, f] { if (! loadProjectFile (f)) showMessage ("Couldn't open project", "RENASOUND can open its own projects, Ableton Live sets and Mixcraft projects."); });
+        askToSaveThen ([this, f] { if (! loadProjectFile (f)) showMessage ("Couldn't open project", "RENASOUND can open its own projects, Ableton Live sets, Mixcraft projects and MIDI files."); });
     };
     logo = juce::ImageCache::getFromMemory (BinaryData::logo_mark_png, BinaryData::logo_mark_pngSize);
     ctx.onSelectionChanged = [this]
@@ -401,6 +415,10 @@ void MainComponent::resized()
     r.reduce (6, 6);
     juce::Component* comps[] = { &timeline, &divider, &tabs };
     layout.layOutComponents (comps, 3, r.getX(), r.getY(), r.getWidth(), r.getHeight(), true, true);
+
+    const int nw = juce::jmin (620, timeline.getWidth() - 40);
+    const int lines = notice.text.containsChar ('\n') ? 3 : 1;
+    notice.setBounds (timeline.getX() + (timeline.getWidth() - nw) / 2, timeline.getY() + 34, nw, 18 * lines + 16);
 }
 
 void MainComponent::timerCallback()
@@ -588,7 +606,7 @@ void MainComponent::renameTrack (int trackId)
 void MainComponent::importAudio()
 {
     chooser = std::make_unique<juce::FileChooser> ("Import audio", juce::File::getSpecialLocation (juce::File::userMusicDirectory),
-                                                   audioCache.formats.getWildcardForAllFormats());
+                                                   audioCache.formats.getWildcardForAllFormats() + ";*.mid;*.midi;*.kar");
     chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles
                               | juce::FileBrowserComponent::canSelectMultipleItems,
                           [this] (const juce::FileChooser& fc)
@@ -598,10 +616,19 @@ void MainComponent::importAudio()
         auto target = project.findTrack (ctx.selectedTrackId);
         for (auto& f : fc.getResults())
         {
+            if (isMidiFile (f))
+            {
+                const auto beat = engine.getPositionBeats();
+                juce::MessageManager::callAsync ([this, f, beat] { addMidiFile (f, std::floor (beat / project.beatsPerBar) * project.beatsPerBar); });
+                continue;
+            }
             if (target == nullptr || target->type != Track::Type::Audio || ! target->clips.empty())
                 target = project.addTrack (Track::Type::Audio);
             if (auto c = project.addAudioClip (target->id, f, engine.getPositionBeats()))
+            {
                 ctx.selectClip (c->id);
+                if (const auto what = fitClipToSong (c->id, true); what.isNotEmpty()) notice.show (what);
+            }
             target = nullptr;   // next file goes on a new track
         }
     });
@@ -646,6 +673,14 @@ void MainComponent::openProject()
 
 bool MainComponent::loadProjectFile (const juce::File& f)
 {
+    if (isMidiFile (f))
+    {
+        soundmatch::setInstalledPlugins (engine.pluginHost.knownPlugins.getTypes());
+        auto imp = importMidiFile (f);
+        if (! imp.ok) { showMessage ("Couldn't open the MIDI file", imp.error); return true; }
+        applyImport (imp, f);
+        return true;
+    }
     if (isMixcraftProject (f) || isAbletonProject (f))
     {
         importMixcraft (f, {});
@@ -668,6 +703,7 @@ bool MainComponent::loadProjectFile (const juce::File& f)
 // =============================================================================
 void MainComponent::importMixcraft (const juce::File& f, juce::Array<juce::File> searchFolders)
 {
+    soundmatch::setInstalledPlugins (engine.pluginHost.knownPlugins.getTypes());
     auto imp = std::make_shared<DawImport> (isAbletonProject (f) ? importAbletonProject (f, searchFolders)
                                                                  : importMixcraftProject (f, searchFolders));
     if (! imp->ok)
@@ -722,17 +758,117 @@ void MainComponent::applyImport (DawImport& imp, const juce::File& source)
     if (! project.tracks.empty()) ctx.selectTrack (project.tracks.front()->id);
     timeline.zoomToFit();
 
-    juce::String text = "Imported \"" + source.getFileNameWithoutExtension() + "\": " + imp.summary + ".\n\n"
-                        + imp.fromApp + "'s own instruments and effects can't be carried over, so instrument tracks use "
-                        "RENASOUND sounds (drum kits get RENASOUND Drums; pick others, or load your plugins, on each track). "
-                        + (imp.numAutomationLanes > 0 ? juce::String ("Volume and pan are copied, along with ") + juce::String (imp.numAutomationLanes)
-                                                          + " volume/pan automation lane(s); other automation isn't."
-                                                        : juce::String ("Volume and pan are copied; " + imp.fromApp + "'s automation isn't."));
-    for (auto& n : imp.notes) text << "\n\n" << n;
+    juce::String text = "Imported \"" + source.getFileNameWithoutExtension() + "\": " + imp.summary + ".";
+    juce::StringArray matched, other;
+    for (auto& n : imp.notes) (n.startsWithChar ('"') ? matched : other).add (n);
+    if (! matched.isEmpty())
+    {
+        text << "\n\nEach instrument track got the closest sound RENASOUND could find:\n";
+        for (int i = 0; i < juce::jmin (12, matched.size()); ++i) text << "\n  " << matched[i];
+        if (matched.size() > 12) text << "\n  ...and " << (matched.size() - 12) << " more";
+        if (soundmatch::getGmSoundFont() == juce::File() && imp.fromApp != "Ableton Live")
+            text << "\n\nTip: load a General MIDI SoundFont (.sf2) once in the Multi Sampler, and imports will use its real pianos, guitars, strings and drums.";
+    }
+    if (imp.fromApp != "MIDI file")
+        text << "\n\n" << (imp.numAutomationLanes > 0 ? juce::String ("Volume and pan are copied, along with ") + juce::String (imp.numAutomationLanes)
+                                                          + " volume/pan automation lane(s); " + imp.fromApp + "'s effects and other automation aren't."
+                                                        : imp.fromApp + "'s effects and automation aren't copied; volume and pan are.");
+    for (auto& n : other) text << "\n\n" << n;
     if (! imp.missingFiles.isEmpty())
         text << "\n\n" << imp.missingFiles.size() << " audio file(s) weren't found, so their clips were left out.";
     text << "\n\nSave to keep it as a RENASOUND project.";
-    showMessage (imp.fromApp + " project imported", text);
+    showMessage (imp.fromApp == "MIDI file" ? juce::String ("MIDI file opened") : imp.fromApp + " project imported", text);
+}
+
+juce::String MainComponent::fitClipToSong (int clipId, bool automatic)
+{
+    TrackPtr track;
+    auto clip = project.findClip (clipId, &track);
+    if (clip == nullptr || clip->type != Clip::Type::Audio || clip->audio == nullptr || clip->locked) return {};
+    if (! automatic && clip->audio->getLengthSeconds() > 600)
+    {
+        showMessage ("Too long to fit", "Fitting works on clips up to 10 minutes long.");
+        return {};
+    }
+
+    juce::MouseCursor::showWaitCursor();
+    const juce::ScopeGuard restoreCursor { [] { juce::MouseCursor::hideWaitCursor(); } };
+    const auto src = clip->audio;
+    const auto name = clip->name;
+    const auto a = audiofit::analyse (*src, src->file.getFileNameWithoutExtension(), project.beatsPerBar);
+    bool adoptTempo = false;
+    const auto f = audiofit::plan (a, project, adoptTempo, automatic);
+
+    // the only clip in an empty song: the song takes the loop's tempo
+    bool othersHaveMusic = false;
+    for (auto& t : project.tracks) for (auto& c : t->clips) if (c->id != clipId) othersHaveMusic = true;
+    if (automatic && a.isLoop && ! othersHaveMusic && a.bpm >= 40 && a.bpm <= 240)
+    {
+        const double rounded = std::abs (a.bpm - std::round (a.bpm)) < 0.05 ? std::round (a.bpm) : a.bpm;
+        {
+            const juce::ScopedLock sl (project.lock);
+            project.bpm = rounded;
+            clip->startBeat = std::round (clip->startBeat);
+        }
+        bpm.setValue (rounded, juce::dontSendNotification);
+        project.changed();
+        return name + ": the song now runs at the loop's " + juce::String (rounded, std::abs (rounded - std::round (rounded)) < 1.0e-9 ? 0 : 2) + " BPM"
+               + (a.key >= 0 ? " (" + audiofit::keyName (a.key, a.minor) + ")" : juce::String());
+    }
+    if (! f.tempo && ! f.key)
+    {
+        if (! automatic)
+            showMessage ("Already fits", name + (a.bpm > 0 ? " is at " + juce::String (a.bpm, 1) + " BPM" : juce::String (" has no steady beat"))
+                                      + (a.key >= 0 ? ", in " + audiofit::keyName (a.key, a.minor) : juce::String())
+                                      + ", so there's nothing to change for this song.");
+        return {};
+    }
+
+    juce::String error;
+    const auto file = audiofit::renderToFile (*src, f, src->file.getFileNameWithoutExtension(), error);
+    auto data = file.existsAsFile() ? project.audioCache.load (file) : nullptr;
+    if (data == nullptr) { if (! automatic) showMessage ("Couldn't fit the clip", error); return {}; }
+    if (! automatic) project.beginEdit();
+    {
+        const juce::ScopedLock sl (project.lock);
+        clip->audio = data;
+        clip->offsetSeconds *= f.stretch;
+        clip->lengthSeconds = juce::jmin (clip->lengthSeconds * f.stretch, data->getLengthSeconds() - clip->offsetSeconds);
+        clip->fadeInSeconds *= f.stretch; clip->fadeOutSeconds *= f.stretch;
+        clip->pitch = {};   // pitch edits were made on the old audio
+        clip->pitchRendered = nullptr;
+    }
+    project.changed();
+    return name + ": " + f.description;
+}
+
+void MainComponent::addMidiFile (const juce::File& f, double beat)
+{
+    soundmatch::setInstalledPlugins (engine.pluginHost.knownPlugins.getTypes());
+    auto imp = importMidiFile (f);
+    if (! imp.ok) { showMessage ("Couldn't import the MIDI file", imp.error); return; }
+
+    bool songIsEmpty = true;
+    for (auto& t : project.tracks) if (! t->clips.empty()) songIsEmpty = false;
+    if (songIsEmpty && ! project.dirty)
+    {
+        applyImport (imp, f);   // nothing to keep: the file becomes the song, tempo and all
+        return;
+    }
+
+    // add its parts to this song, at the bar it was dropped on (the song keeps its tempo)
+    project.beginEdit();
+    auto xml = project.toXml();
+    int firstId = project.newId() + 1000;
+    const int added = appendImportedTracks (*xml, *imp.project, beat, firstId);
+    project.fromXml (*xml);
+    project.changed();
+
+    juce::String text = juce::String (added) + " track" + (added == 1 ? "" : "s") + " added from \"" + f.getFileNameWithoutExtension() + "\"";
+    if (std::abs (imp.bpm - project.bpm) > 0.5) text << " (the file is at " << juce::String (imp.bpm, 1) << " BPM; the song stays at " << juce::String (project.bpm, 1) << ")";
+    text << ".\n";
+    for (auto& n : imp.notes) if (n.startsWithChar ('"')) text << "\n  " << n;
+    showMessage ("MIDI file added", text);
 }
 
 void MainComponent::saveProject (bool saveAs, std::function<void (bool)> done)
@@ -843,7 +979,7 @@ void MainComponent::getCommandInfo (juce::CommandID id, juce::ApplicationCommand
         case cmdOpen:     info.setInfo ("Open project...", "", "File", 0);        info.addDefaultKeypress ('o', cmd); break;
         case cmdSave:     info.setInfo ("Save", "", "File", 0);                   info.addDefaultKeypress ('s', cmd); break;
         case cmdSaveAs:   info.setInfo ("Save as...", "", "File", 0);             info.addDefaultKeypress ('s', cmd | shift); break;
-        case cmdImport:   info.setInfo ("Import audio...", "", "File", 0);        info.addDefaultKeypress ('i', cmd); break;
+        case cmdImport:   info.setInfo ("Import audio or MIDI...", "", "File", 0);        info.addDefaultKeypress ('i', cmd); break;
         case cmdExport:   info.setInfo ("Mix down to WAV...", "", "File", 0);     info.addDefaultKeypress ('e', cmd); break;
         case cmdAudioSettings: info.setInfo ("Audio & MIDI setup...", "", "File", 0); info.addDefaultKeypress (',', cmd); break;
 
@@ -881,7 +1017,7 @@ void MainComponent::getCommandInfo (juce::CommandID id, juce::ApplicationCommand
         case cmdShowMixer:   info.setInfo ("Mixer", "", "View", 0);   info.addDefaultKeypress ('2', cmd); break;
         case cmdShowLibrary: info.setInfo ("Library", "", "View", 0); info.addDefaultKeypress ('3', cmd); break;
         case cmdPluginManager: info.setInfo ("Plugins (scan VST3 / AU)...", "", "File", 0); info.addDefaultKeypress ('p', cmd | shift); break;
-        case cmdImportMixcraft: info.setInfo ("Import Ableton Live or Mixcraft project...", "", "File", 0); break;
+        case cmdImportMixcraft: info.setInfo ("Import Ableton Live, Mixcraft or MIDI file...", "", "File", 0); break;
         case cmdTrackEffects:  info.setInfo ("Add effect to selected track...", "", "Edit", 0); info.addDefaultKeypress ('f', cmd); info.setActive (project.findTrack (ctx.selectedTrackId) != nullptr); break;
         case cmdMasterEffects: info.setInfo ("Add effect to master...", "", "Edit", 0); info.addDefaultKeypress ('f', cmd | shift); break;
         default: break;
@@ -962,14 +1098,15 @@ bool MainComponent::perform (const InvocationInfo& info)
             {
                 chooser = std::make_unique<juce::FileChooser> ("Import an Ableton Live set or a Mixcraft project",
                                                                juce::File::getSpecialLocation (juce::File::userDocumentsDirectory),
-                                                               "*.als;*.mx4;*.mx5;*.mx6;*.mx7;*.mx8;*.mx9;*.mx10;*.mx11;*.mx12");
+                                                               "*.als;*.mid;*.midi;*.kar;*.mx4;*.mx5;*.mx6;*.mx7;*.mx8;*.mx9;*.mx10;*.mx11;*.mx12");
                 chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
                                       [this] (const juce::FileChooser& fc)
                 {
                     const auto f = fc.getResult();
                     if (! f.existsAsFile()) return;
                     if (isMixcraftProject (f) || isAbletonProject (f)) importMixcraft (f, {});
-                    else showMessage ("Couldn't import", "That isn't an Ableton Live set or a Mixcraft project.");
+                    else if (isMidiFile (f)) loadProjectFile (f);
+                    else showMessage ("Couldn't import", "That isn't an Ableton Live set, a Mixcraft project or a MIDI file.");
                 });
             });
             break;

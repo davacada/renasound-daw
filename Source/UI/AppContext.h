@@ -29,6 +29,11 @@ struct AppContext
     std::function<void (int trackId)> showInMixer;     // jump to a track's channel strip
     std::function<void()> openPluginManager;
     std::function<void (const juce::File&)> openProjectFile;   // .renasound or another DAW's project
+    std::function<void (const juce::File&, double beat)> addMidiFile;   // a .mid dropped into the song
+    // fits an audio clip to the song's tempo and key; automatic = only loops, as they're imported.
+    // Returns what changed ("Drum Loop: 92 -> 120 BPM"), or empty if nothing needed to.
+    std::function<juce::String (int clipId, bool automatic)> fitClipToSong;
+    std::function<void (const juce::String&)> notify;   // a short note that fades away
 
     // "Soft Pad", or the plugin instrument's name
     static juce::String instrumentName (const Track& t)

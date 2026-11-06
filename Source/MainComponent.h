@@ -130,6 +130,38 @@ private:
     void openProject();
     void importMixcraft (const juce::File&, juce::Array<juce::File> searchFolders);
     void applyImport (DawImport&, const juce::File& source);
+    void addMidiFile (const juce::File&, double beat);   // into the current song (or as the song, if it's empty)
+    juce::String fitClipToSong (int clipId, bool automatic);
+
+    // a short note at the top of the timeline that fades away by itself
+    class Notice : public juce::Component, private juce::Timer
+    {
+    public:
+        Notice() { setInterceptsMouseClicks (false, false); setAlwaysOnTop (true); }
+        void show (const juce::String& t)
+        {
+            text = t; alpha = 1.0f; shownAt = juce::Time::getMillisecondCounter();
+            setVisible (true); repaint(); startTimerHz (30);
+        }
+        void paint (juce::Graphics& g) override
+        {
+            g.setOpacity (alpha);
+            const auto r = getLocalBounds().toFloat().reduced (1);
+            g.setColour (juce::Colour (0xf0202024)); g.fillRoundedRectangle (r, 8);
+            g.setColour (juce::Colour (0xffe8a24a).withAlpha (0.8f)); g.drawRoundedRectangle (r, 8, 1.2f);
+            g.setColour (juce::Colours::white.withAlpha (0.92f)); g.setFont (juce::FontOptions (13.5f));
+            g.drawFittedText (text, getLocalBounds().reduced (14, 6), juce::Justification::centred, 3);
+        }
+        juce::String text;
+    private:
+        void timerCallback() override
+        {
+            const auto age = juce::Time::getMillisecondCounter() - shownAt;
+            if (age > 6000) { alpha -= 0.08f; repaint(); }
+            if (alpha <= 0) { stopTimer(); setVisible (false); }
+        }
+        float alpha = 0; juce::uint32 shownAt = 0;
+    } notice;
     juce::String suggestedProjectName;   // for "Save" after importing another DAW's project
     void saveProject (bool saveAs, std::function<void (bool)> done = {});
     void exportMixdown();

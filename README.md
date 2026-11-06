@@ -6,6 +6,20 @@ A Mixcraft-style music DAW for **macOS and Windows**, written in C++ with JUCE.
 
 ![RENASOUND](docs/screenshot.png)
 
+## What's new in 0.15: imports match the sound
+
+- **Projects (Mixcraft, Ableton Live)**: every instrument track now gets the closest sound RENASOUND can find, and the import report lists what each track got and why.
+  - The same plugin, if it's installed on this computer (with its settings, when Mixcraft saved them in a form RENASOUND can read).
+  - Otherwise from the names: the preset ("Acoustic Piano", "Sub Bass", "Guzheng Height"), the track, Mixcraft's category ("Keyboard - Piano", "Percussion - Drum Kits") and the instrument. About 270 instrument words and names are recognised, from "rhodes" and "wurli" to "pizzicato", "koto" and "808".
+  - Otherwise from the notes the track plays: low single notes are a bass, long chords a pad, short chords keys, high single notes a lead, and a drum-map pattern drums.
+  - Ableton's Simpler, Sampler and Drum Rack tracks bring their own samples: the Multi Sampler plays the very same samples, mapped the same way.
+- **MIDI files (.mid)**: open one as a new song, or drop it into a song (its parts land on the bar you drop them on). Each part gets the instrument the file asks for (General MIDI), channel 10 gets drums, and the tempo, time signature, volume and pan come along.
+- **Your General MIDI SoundFont**: load a full General MIDI .sf2 once in the Multi Sampler and RENASOUND remembers it. From then on, imported pianos, guitars, strings, brass and drum kits use its real sampled instruments.
+- **Audio loops fit the song**:
+  - Dropping or importing a loop detects its tempo (from the file name, like "Funk 100bpm Am", or by listening to the beat) and its key, then stretches it to the song's tempo and moves it to the song's key. A note says what changed; one undo brings back the original.
+  - The first loop in an empty song sets the song's tempo instead.
+  - Any audio clip: right-click, then "Fit to the song's tempo and key". The stretch keeps the pitch and the attack of drums.
+
 ## What's new in 0.14.2
 
 - **Option-drag to duplicate** (Alt on Windows): hold Option and drag a clip on the timeline, or notes in the piano roll, to drag out a copy and leave the original where it was. Free (unsnapped) dragging moved to Command (Ctrl on Windows).
@@ -303,6 +317,9 @@ Source/
   Fx4.cpp             Multiband Compressor, Shimmer Reverb, Tuner, Spectrum Analyser, Vocal Remover
   Keys.cpp            Organ, Electric Piano, Acid Bass
   ReleasePool.h       frees replaced samples and instruments away from the audio thread
+  SoundMatch.*        picks the closest sound for imported tracks (plugins, names, General MIDI, notes)
+  MidiImport.*        reads MIDI files
+  AudioFit.*          tempo and key detection, time-stretch and pitch-shift to fit audio to the song
   SynthFx.cpp         RENASYNTH: oscillators, filters, envelopes, 2 LFOs, mod matrix, its panel
   MultiSampler.*      the Multi Sampler: name mapping, SFZ, SoundFont (SF2), zones / layers / round robins, its panel
   NcwReader.h         reads NCW sample files

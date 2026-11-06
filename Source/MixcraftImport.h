@@ -9,9 +9,10 @@
 //    - audio tracks and MIDI tracks: names, volume, pan, mute
 //    - audio clips: position, length, trim, with crossfades where clips overlap
 //    - MIDI clips and their notes (looped clips are unrolled)
-//  Mixcraft's bundled organs, electric pianos and 303 bass are played by their
-//  RENASOUND counterparts (Organ, Electric Piano, Acid Bass); other instruments
-//  get a RENASYNTH sound or RENASOUND Drums.
+//  Each instrument track gets the closest sound (SoundMatch.h): the same plugin
+//  if it's installed, else from the preset, category and instrument names
+//  (Mixcraft's organs, electric pianos and 303 get RENASOUND's Organ, Electric
+//  Piano and Acid Bass), else from the notes the track plays.
 //  What can't: Mixcraft's effects, automation, Melodyne data.
 // =============================================================================
 
@@ -29,7 +30,7 @@ struct DawImport
     std::unique_ptr<juce::XmlElement> project;   // a RENASOUND_PROJECT, ready for Project::fromXml
     juce::StringArray missingFiles;              // audio files that couldn't be found (clips skipped)
     juce::String summary;                        // e.g. "12 tracks, 1040 clips"
-    int numTracks = 0, numAudioClips = 0, numMidiClips = 0, numNotes = 0, numAutomationLanes = 0;
+    int numTracks = 0, numAudioClips = 0, numMidiClips = 0, numNotes = 0, numAutomationLanes = 0, numMatchedSounds = 0;
     double bpm = 120.0;
     juce::String fromApp = "Mixcraft";
     juce::StringArray notes;                     // things the user should know (e.g. "warped clips play unstretched")
