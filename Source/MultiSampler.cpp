@@ -273,7 +273,7 @@ InstrumentPtr mapFiles (const juce::Array<juce::File>& filesIn, const juce::File
     {
         std::map<int, int> votes;
         int asked = 0;
-        const size_t stride = juce::jmax<size_t> (1, items.size() / 60);
+        const size_t stride = std::max<size_t> (1, items.size() / 60);
         for (size_t i = 0; i < items.size(); i += stride)
         {
             if (! items[i].named || loaded[i] == nullptr || items[i].ni.release) continue;
