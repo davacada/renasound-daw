@@ -266,9 +266,16 @@ public:
         owner.edited (false);
     }
 
-    void mouseUp (const juce::MouseEvent&) override
+    void mouseUp (const juce::MouseEvent& e) override
     {
         if (dragging) owner.edited (true);
+        // a plain click anywhere in the editor puts the playhead there
+        if (owner.clip != nullptr && e.getDistanceFromDragStart() < 3 && ! e.mods.isPopupMenu() && ! e.mods.isShiftDown() && ! e.mods.isCommandDown())
+        {
+            const double secPerBeat = 60.0 / owner.ctx.project.bpm;
+            const double songSec = owner.xToSec (e.position.x) - owner.clip->offsetSeconds + owner.clip->startBeat * secPerBeat;
+            owner.ctx.engine.setPositionBeats (juce::jmax (0.0, songSec / secPerBeat));
+        }
         dragging = false;
         pressedNote = -1;
         lasso = {};

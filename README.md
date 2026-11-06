@@ -6,6 +6,16 @@ A Mixcraft-style music DAW for **macOS and Windows**, written in C++ with JUCE.
 
 ![RENASOUND](docs/screenshot.png)
 
+## What's new in 0.14.2
+
+- **Option-drag to duplicate** (Alt on Windows): hold Option and drag a clip on the timeline, or notes in the piano roll, to drag out a copy and leave the original where it was. Free (unsnapped) dragging moved to Command (Ctrl on Windows).
+- **Click to move the playhead**: a plain click anywhere in the editor's timeline (on a clip, in the piano roll, in the pitch editor) moves the playhead there.
+- **Steadier playback**:
+  - Swapping a sample, drum kit, sample library or SoundFont while the song plays no longer frees the old one on the audio thread (that could cause a dropout); it's released a moment later in the background.
+  - When the project is being edited at the exact moment the audio needs it, playback now waits a fraction of a millisecond instead of skipping the block, and if it does have to skip, it fades out and back in instead of clicking.
+  - The Tuner, Multi Sampler, Organ and Acid Bass no longer allocate memory while playing.
+  - Fixed an arithmetic overflow in the pitch-edit check (found with sanitiser builds; every test was run under AddressSanitizer and UBSan).
+
 ## What's new in 0.14.1
 
 - Fixed: closing a device's window and opening it again showed a plain list of controls instead of its panel (instruments, effects and plugins).
@@ -292,6 +302,7 @@ Source/
   Fx3.cpp             Rotary, De-esser, Bit Crusher, Dub Delay, Limiter, Ring Mod, Sub Bass
   Fx4.cpp             Multiband Compressor, Shimmer Reverb, Tuner, Spectrum Analyser, Vocal Remover
   Keys.cpp            Organ, Electric Piano, Acid Bass
+  ReleasePool.h       frees replaced samples and instruments away from the audio thread
   SynthFx.cpp         RENASYNTH: oscillators, filters, envelopes, 2 LFOs, mod matrix, its panel
   MultiSampler.*      the Multi Sampler: name mapping, SFZ, SoundFont (SF2), zones / layers / round robins, its panel
   NcwReader.h         reads NCW sample files

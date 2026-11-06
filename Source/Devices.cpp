@@ -1,6 +1,7 @@
 // =============================================================================
 //  RENASOUND devices with their own faceplates (see Devices.h)
 // =============================================================================
+#include "ReleasePool.h"
 #include "Devices.h"
 #include "DspHelpers.h"
 #include "UI/Theme.h"
@@ -1688,6 +1689,7 @@ private:
     void setSample (SamplePtr smp)
     {
         const juce::SpinLock::ScopedLockType sl (sampleLock);
+        rs::ReleasePool::get().add (current);   // freed later on this thread, never by the audio thread
         current = std::move (smp);
         for (auto& v : voices) v.active = false;
     }

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(Renasound VERSION 0.14.1 LANGUAGES C CXX)
+project(Renasound VERSION 0.14.2 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

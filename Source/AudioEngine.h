@@ -160,6 +160,11 @@ private:
     AudioDataPtr previewData;
     std::atomic<double> previewPos { -1 };
     juce::SpinLock previewLock;
+public:
+    std::atomic<int> missedBlocks { 0 };   // blocks skipped because the project was being edited (for diagnostics)
+private:
+    float lastOut[2] {};                    // last output sample, to fade out cleanly if a block is skipped
+    bool needsFadeIn = false;
 
     double metronomePhase = 0;
     int metronomeSamplesLeft = 0;

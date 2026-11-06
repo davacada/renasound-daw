@@ -212,6 +212,7 @@ public:
         const int i = noteAt (e.position);
         const auto edge = edgeAt (i, e.position);
         if (edge != Edge::None)                         setMouseCursor (juce::MouseCursor::LeftRightResizeCursor);
+        else if (i >= 0 && e.mods.isAltDown() && owner.tool != Tool::Edit) setMouseCursor (juce::MouseCursor::CopyingCursor);
         else if (i >= 0 && owner.tool == Tool::Edit)    setMouseCursor (juce::MouseCursor::UpDownResizeCursor);
         else if (i >= 0)                                setMouseCursor (juce::MouseCursor::DraggingHandCursor);
         else if (owner.tool == Tool::Draw)              setMouseCursor (juce::MouseCursor::CrosshairCursor);
@@ -236,6 +237,8 @@ public:
         downBeat = xToBeat (e.position.x);
         downPos = e.position;
         drag = Drag::None;
+        duplicateOnDrag = false;
+        moved = false;
 
         if (i >= 0)
         {
@@ -255,6 +258,7 @@ public:
             originals.clear();
             for (int s : selection) originals.push_back (notes[(size_t) s]);
             anchor = i;
+            duplicateOnDrag = drag == Drag::Move && e.mods.isAltDown();   // Option (Alt) + drag: drag copies, the originals stay
             audition (notes[(size_t) i].pitch);
         }
         else if (owner.tool == Tool::Draw)
@@ -303,6 +307,26 @@ public:
             return;
         }
 
+        if (! moved)
+        {
+            if (e.getDistanceFromDragStart() < 3) return;
+            moved = true;
+            if (duplicateOnDrag)
+            {
+                // the copies are what move; the originals stay where they were
+                const juce::ScopedLock sl (p.lock);
+                std::vector<int> copies;
+                int newAnchor = anchor;
+                for (int idx : selection)
+                {
+                    notes.push_back (notes[(size_t) idx]);
+                    copies.push_back ((int) notes.size() - 1);
+                    if (idx == anchor) newAnchor = copies.back();
+                }
+                selection = copies;
+                anchor = newAnchor;
+            }
+        }
         const double s = e.mods.isShiftDown() ? 0.0 : owner.snap;
         const double delta = xToBeat (e.position.x) - downBeat;
         const juce::ScopedLock sl (p.lock);
@@ -356,9 +380,12 @@ public:
         repaint();
     }
 
-    void mouseUp (const juce::MouseEvent&) override
+    void mouseUp (const juce::MouseEvent& e) override
     {
         if (drag != Drag::None && drag != Drag::Marquee) owner.ctx.project.changed();
+        // a plain click anywhere in the editor puts the playhead there
+        if (owner.clip != nullptr && e.getDistanceFromDragStart() < 3 && ! e.mods.isPopupMenu() && ! e.mods.isShiftDown() && ! e.mods.isCommandDown())
+            owner.ctx.engine.setPositionBeats (juce::jmax (0.0, owner.clip->startBeat + owner.ctx.snapBeat (downBeat, owner.snap)));
         drag = Drag::None;
         marquee = {};
         velocityReadout.clear();
@@ -615,6 +642,7 @@ private:
     juce::Rectangle<float> marquee;
     juce::String velocityReadout;
     double downBeat = 0, lastLength = 1.0;
+    bool duplicateOnDrag = false, moved = false;
     float lastVelocity = 0.8f;
     int auditioning = -1;
 };

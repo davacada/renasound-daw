@@ -73,15 +73,15 @@ struct PitchEdit
     }
     juce::int64 hash() const
     {
-        juce::int64 h = 1469598103934665603LL;
-        auto mix = [&h] (juce::int64 v) { h = (h ^ v) * 1099511628211LL; };
+        juce::uint64 h = 1469598103934665603ULL;   // (unsigned: wraps around by design)
+        auto mix = [&h] (juce::int64 v) { h = (h ^ (juce::uint64) v) * 1099511628211ULL; };
         for (auto& n : notes)
         {
             mix (n.start); mix (n.end);
             mix ((juce::int64) std::lround (n.shift * 1000.0f));
             mix ((juce::int64) std::lround (n.drift * 1000.0f));
         }
-        return h;
+        return (juce::int64) h;
     }
 };
 

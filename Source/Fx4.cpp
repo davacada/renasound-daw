@@ -474,7 +474,7 @@ public:
         currentSampleRate = sr;
         decim = juce::jmax (1, (int) std::round (sr / 24000.0));   // 24 kHz: fine enough for a cent at the top of a guitar
         rate = sr / decim;
-        buf.assign (2048, 0.0f); pos = 0; count = 0; acc = 0; accN = 0; lp = 0;
+        buf.assign (2048, 0.0f); xs.reserve (2048); ds.reserve (2048); cms.reserve (2048); pos = 0; count = 0; acc = 0; accN = 0; lp = 0;
         hz = 0;
     }
     void releaseResources() override {}
@@ -499,18 +499,20 @@ public:
         measureOut (b);
     }
 private:
-    std::vector<float> buf;
+    std::vector<float> buf, xs;          // (work space sized in prepareToPlay: detect() runs on the audio thread)
+    std::vector<double> ds, cms;
     int pos = 0, count = 0, decim = 4, accN = 0;
     float acc = 0, lp = 0;
     double rate = 12000;
     void detect()
     {
         const int W = 1024, maxLag = juce::jmin ((int) buf.size() - W - 1, (int) (rate / 40.0)), minLag = (int) (rate / 1500.0);
-        std::vector<float> x ((size_t) (W + maxLag));
+        auto& x = xs; x.resize ((size_t) (W + maxLag));
         for (int i = 0; i < W + maxLag; ++i) x[(size_t) i] = buf[(size_t) ((pos - (W + maxLag) + i + (int) buf.size() * 2) % (int) buf.size())];
         double energy = 0; for (int i = 0; i < W; ++i) energy += x[(size_t) i] * x[(size_t) i];
         if (energy / W < 1.0e-7) { clarity = 0; return; }
-        std::vector<double> d ((size_t) maxLag + 1, 0.0), cm ((size_t) maxLag + 1, 1.0);
+        auto& d = ds; auto& cm = cms;
+        d.assign ((size_t) maxLag + 1, 0.0); cm.assign ((size_t) maxLag + 1, 1.0);
         double run = 0;
         for (int tau = 1; tau <= maxLag; ++tau)
         {

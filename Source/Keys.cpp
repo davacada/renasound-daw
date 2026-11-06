@@ -209,7 +209,8 @@ public:
         const int rot = (int) param ("rotary");
         if (rot > 0 && buffer.getNumChannels() >= 2)
         {
-            setParam (*rotary, "speed", (rot == 2 || modWheelFast) ? 1.0f : 0.0f);
+            const float speed = (rot == 2 || modWheelFast) ? 1.0f : 0.0f;
+            if (speed != lastRotarySpeed) { setParam (*rotary, "speed", speed); lastRotarySpeed = speed; }   // only on a change
             juce::MidiBuffer none;
             rotary->processBlock (buffer, none);
         }
@@ -231,6 +232,7 @@ public:
 
 private:
     std::unique_ptr<BuiltinFx> rotary;
+    float lastRotarySpeed = -1.0f;
     std::array<double, numWheels> phase {};
     std::array<float, numWheels> amp {}, target {}, percTarget {};
     std::array<bool, 128> held {};
@@ -871,7 +873,7 @@ public:
         currentSampleRate = sr;
         ph = 0; freq = target = 55; gate = false; ampEnv = 0; filtEnv = 0; accentCharge = 0;
         std::memset (ld, 0, sizeof (ld)); lastOut = 0;
-        lastStep = -1; heldNotes.clear(); freeClock = 0;
+        lastStep = -1; heldNotes.clear(); heldNotes.ensureStorageAllocated (128); freeClock = 0;
     }
     void releaseResources() override {}
 
@@ -936,7 +938,7 @@ public:
                         else trigger (heldNotes.getLast() + tune, false, true);
                     }
                 }
-                else if (m.isAllNotesOff() || m.isAllSoundOff()) { heldNotes.clear(); gate = false; }
+                else if (m.isAllNotesOff() || m.isAllSoundOff()) { heldNotes.clearQuick(); gate = false; }
                 ++it;
             }
 

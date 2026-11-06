@@ -1,3 +1,4 @@
+#include "ReleasePool.h"
 #include "MultiSampler.h"
 #include "DspHelpers.h"
 #include "NcwReader.h"
@@ -934,6 +935,7 @@ public:
     {
         {
             const juce::SpinLock::ScopedLockType sl (lock);
+            rs::ReleasePool::get().add (inst);   // the audio side may still be playing it: free it later, here
             inst = std::move (p);
             killAll = true;
         }
@@ -1072,6 +1074,9 @@ private:
     };
     std::array<Voice, maxVoices> voices;
     InstrumentPtr inst, playingInst;
+    std::vector<const Zone*> matchScratch = reserved<const Zone*> (4096);
+    std::vector<int> takesScratch = reserved<int> (256);
+    template <typename T> static std::vector<T> reserved (size_t n) { std::vector<T> v; v.reserve (n); return v; }
     mutable juce::SpinLock lock;
     bool killAll = false, sustainPedal = false;
     std::array<int, 128> rrCounter {};
@@ -1154,20 +1159,22 @@ private:
         const int artic = currentArtic (in);
         const int v127 = juce::jlimit (1, 127, (int) std::lround (vel * 127.0f));
         // the zones that match this key, loudness and articulation
-        std::vector<const Zone*> match;
+        auto& match = matchScratch;   // (reserved up front: no allocation while playing)
+        match.clear();
         int maxRR = 0;
         for (auto& z : in.zones)
             if (z.release == releaseTrigger && note >= z.loKey && note <= z.hiKey && v127 >= z.loVel && v127 <= z.hiVel
                 && (z.articulation < 0 || z.articulation == artic))
             {
-                match.push_back (&z);
+                if (match.size() < match.capacity()) match.push_back (&z);
                 maxRR = juce::jmax (maxRR, z.rr);
             }
         if (match.empty()) return;
         if (maxRR > 0)
         {
             // round robin: the takes this note has, in turn (or at random)
-            std::vector<int> takes;
+            auto& takes = takesScratch;
+            takes.clear();
             for (auto* z : match) if (z->rr > 0 && std::find (takes.begin(), takes.end(), z->rr) == takes.end()) takes.push_back (z->rr);
             std::sort (takes.begin(), takes.end());
             const int mode = (int) param ("rrmode");

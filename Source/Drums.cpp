@@ -1,3 +1,4 @@
+#include "ReleasePool.h"
 #include "Drums.h"
 #include "UI/Theme.h"
 
@@ -425,6 +426,7 @@ void DrumMachine::resynthesise (int pad)
     smp->buffer.copyFrom (1, 0, x.data(), (int) x.size());
     {
         const juce::SpinLock::ScopedLockType sl (padLock);
+        rs::ReleasePool::get().add (pads[(size_t) pad].sample);
         pads[(size_t) pad].sample = smp;
     }
     if (onPadsChanged) onPadsChanged();
@@ -496,6 +498,7 @@ void DrumMachine::loadKit (int kit)
         const juce::SpinLock::ScopedLockType sl (padLock);
         for (int p = 0; p < numPads; ++p)
         {
+            rs::ReleasePool::get().add (pads[(size_t) p].sample);
             pads[(size_t) p].sample = fresh[(size_t) p];
             pads[(size_t) p].customFile = juce::File();
         }
@@ -525,6 +528,7 @@ bool DrumMachine::loadPadSample (int pad, const juce::File& f)
     if (s == nullptr) return false;
     {
         const juce::SpinLock::ScopedLockType sl (padLock);
+        rs::ReleasePool::get().add (pads[(size_t) pad].sample);
         pads[(size_t) pad].sample = s;
         pads[(size_t) pad].customFile = f;
     }
@@ -544,6 +548,7 @@ void DrumMachine::resetPad (int pad)
     s->buffer.copyFrom (1, 0, x.data(), (int) x.size());
     {
         const juce::SpinLock::ScopedLockType sl (padLock);
+        rs::ReleasePool::get().add (pads[(size_t) pad].sample);
         pads[(size_t) pad].sample = s;
         pads[(size_t) pad].customFile = juce::File();
     }
@@ -589,6 +594,7 @@ bool DrumMachine::loadKitFolder (const juce::File& folder)
             if (auto s = loadSampleFile (chosen[(size_t) p]))
             {
                 const juce::SpinLock::ScopedLockType sl (padLock);
+                rs::ReleasePool::get().add (pads[(size_t) p].sample);
                 pads[(size_t) p].sample = s;
                 pads[(size_t) p].customFile = chosen[(size_t) p];
                 ++loaded;

@@ -1063,6 +1063,7 @@ public:
         if (h.clip == nullptr)          setMouseCursor (juce::MouseCursor::NormalCursor);
         else if (h.clip->locked)        setMouseCursor (juce::MouseCursor::NormalCursor);
         else if (h.edge != Edge::None)  setMouseCursor (juce::MouseCursor::LeftRightResizeCursor);
+        else if (e.mods.isAltDown())    setMouseCursor (juce::MouseCursor::CopyingCursor);   // Option-drag makes a copy
         else                            setMouseCursor (juce::MouseCursor::DraggingHandCursor);
     }
 
@@ -1072,6 +1073,7 @@ public:
         mode = Mode::None;
         dragging = false;
         selectOnlyOnUp = false;
+        duplicateOnDrag = false;
         origs.clear();
         if (automationMouseDown (e)) return;
         grabKeyboardFocus();
@@ -1103,6 +1105,7 @@ public:
             anchor = h.clip;
             if (h.clip->locked) { owner.repaint(); return; }
             mode = h.edge == Edge::Left ? Mode::TrimLeft : h.edge == Edge::Right ? Mode::TrimRight : Mode::Move;
+            duplicateOnDrag = mode == Mode::Move && e.mods.isAltDown();   // Option (Alt) + drag: drag copies, the originals stay
 
             auto remember = [&] (ClipPtr c)
             {
@@ -1147,11 +1150,13 @@ public:
             dragging = true;
             selectOnlyOnUp = false;
             if (mode != Mode::Marquee) owner.ctx.project.beginEdit();
+            if (duplicateOnDrag) makeDragCopies();
         }
 
         auto& ctx = owner.ctx;
         auto& p = ctx.project;
-        const double snap = e.mods.isAltDown() ? 0.0 : owner.getSnap();
+        // Command (Ctrl) while dragging: move freely, off the grid
+        const double snap = e.mods.isCommandDown() || e.mods.isCtrlDown() ? 0.0 : owner.getSnap();
         const double raw = owner.xToBeat ((float) e.x) - downBeat;
 
         if (mode == Mode::Marquee)
@@ -1245,7 +1250,7 @@ public:
         owner.repaint();
     }
 
-    void mouseUp (const juce::MouseEvent&) override
+    void mouseUp (const juce::MouseEvent& e) override
     {
         if (dragPoint >= 0)
         {
@@ -1254,6 +1259,9 @@ public:
             return;
         }
         if (dragging && mode != Mode::Marquee) owner.ctx.project.changed();
+        // a plain click on a clip also puts the playhead there (a click on empty space already does)
+        if (! dragging && mode != Mode::Marquee && mode != Mode::None && ! e.mods.isAnyModifierKeyDown())
+            owner.ctx.engine.setPositionBeats (juce::jmax (0.0, owner.ctx.snapBeat (downBeat, owner.getSnap())));
         if (! dragging && selectOnlyOnUp && anchor != nullptr) owner.ctx.selectClip (anchor->id);
         if (mode == Mode::Marquee && ! dragging) owner.ctx.rangeStart = owner.ctx.rangeEnd = -1;
         marquee = {};
@@ -1262,6 +1270,33 @@ public:
         origs.clear();
         anchor = nullptr;
         owner.repaint();
+    }
+
+    // Option-drag: copies take the originals' place in the drag (and in the selection); the originals stay put
+    void makeDragCopies()
+    {
+        auto& p = owner.ctx.project;
+        std::vector<int> ids;
+        for (auto& o : origs)
+        {
+            if (o.trackIndex < 0 || o.trackIndex >= (int) p.tracks.size()) continue;
+            Clip src;
+            {
+                const juce::ScopedLock sl (p.lock);
+                src = *o.clip;
+            }
+            if (auto copy = p.addClipCopy (p.tracks[(size_t) o.trackIndex]->id, src, o.start))
+            {
+                if (o.clip == anchor) anchor = copy;
+                o.clip = copy;
+                ids.push_back (copy->id);
+            }
+        }
+        if (! ids.empty())
+        {
+            owner.ctx.setClipSelection (ids);
+            if (anchor != nullptr) owner.ctx.selectedClipId = anchor->id;
+        }
     }
 
     void mouseDoubleClick (const juce::MouseEvent& e) override
@@ -1405,7 +1440,7 @@ private:
     std::vector<int> marqueeStartSelection;
     double downBeat = 0;
     int downRow = -1;
-    bool dragging = false, selectOnlyOnUp = false;
+    bool dragging = false, selectOnlyOnUp = false, duplicateOnDrag = false;
     int dragLaneTrack = -1, dragLane = -1, dragPoint = -1, dragLaneTop = 0;
     std::unique_ptr<juce::FileChooser> chooser;
 };

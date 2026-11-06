@@ -1,3 +1,4 @@
+#include <thread>
 #include "AudioEngine.h"
 #include "MultiSampler.h"
 #include "Export.h"
@@ -707,8 +708,31 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* in, int 
         }
     }
 
-    const juce::ScopedTryLock tl (project.lock);
-    if (! tl.isLocked()) return;   // the UI is mid-edit: skip one block rather than block the audio thread
+    // The UI holds the lock only for tiny edits, so wait a moment for it (up to half a millisecond)
+    // rather than dropping the whole block. If it's still busy, fade out smoothly instead of clicking.
+    bool gotLock = project.lock.tryEnter();
+    if (! gotLock)
+    {
+        const auto t0 = juce::Time::getHighResolutionTicks();
+        const auto budget = juce::Time::secondsToHighResolutionTicks (0.0005);
+        while (! (gotLock = project.lock.tryEnter()) && juce::Time::getHighResolutionTicks() - t0 < budget)
+            std::this_thread::yield();
+    }
+    if (! gotLock)
+    {
+        ++missedBlocks;
+        const int fade = juce::jmin (numSamples, 128);
+        for (int ch = 0; ch < numOut; ++ch)
+            if (out[ch] != nullptr)
+            {
+                const float last = lastOut[juce::jmin (ch, 1)];
+                for (int i = 0; i < fade; ++i) out[ch][i] = last * (1.0f - (float) (i + 1) / (float) fade);
+            }
+        lastOut[0] = lastOut[1] = 0.0f;
+        needsFadeIn = true;
+        return;
+    }
+    struct Unlocker { juce::CriticalSection& c; ~Unlocker() { c.exit(); } } unlocker { project.lock };
 
     if (master.getNumSamples() < numSamples) master.setSize (2, numSamples, false, false, true);
     juce::AudioBuffer<float> mix (master.getArrayOfWritePointers(), 2, 0, numSamples);
@@ -784,6 +808,13 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* in, int 
             previewPos = p;
         }
     }
+
+    if (needsFadeIn)   // coming back after a skipped block: ramp in rather than jump
+    {
+        for (int ch = 0; ch < 2; ++ch) mix.applyGainRamp (ch, 0, juce::jmin (numSamples, 128), 0.0f, 1.0f);
+        needsFadeIn = false;
+    }
+    if (numSamples > 0) { lastOut[0] = mix.getSample (0, numSamples - 1); lastOut[1] = mix.getSample (1, numSamples - 1); }
 
     for (int ch = 0; ch < numOut; ++ch)
         if (out[ch] != nullptr)
