@@ -602,6 +602,447 @@ int main (int argc, char** argv)
         return ok ? 0 : 1;
     }
 
+    if (argc >= 3 && juce::String (argv[1]) == "--sf2")
+    {
+        // the Multi Sampler with a General MIDI SoundFont (argv[2]); argv[3] = a small synth bank; argv[4] = demo wav; argv[5] = picture
+        juce::ScopedJuceInitialiser_GUI gui;
+        const double sr = 48000; const int block = 512;
+        bool ok = true;
+        auto fx = rs::createMultiSampler();
+        fx->setPlayConfigDetails (2, 2, sr, block);
+        fx->prepareToPlay (sr, block);
+        struct Ev { double t; int note; float vel; bool on; };
+        auto play = [&] (std::vector<Ev> ev, double secs)
+        {
+            juce::AudioBuffer<float> out (2, (int) (sr * secs));
+            for (int pos = 0; pos < out.getNumSamples(); pos += block)
+            {
+                const int len = juce::jmin (block, out.getNumSamples() - pos);
+                juce::MidiBuffer m;
+                for (auto& e : ev) { const int at = (int) (e.t * sr); if (at >= pos && at < pos + len) m.addEvent (e.on ? juce::MidiMessage::noteOn (1, e.note, e.vel) : juce::MidiMessage::noteOff (1, e.note), at - pos); }
+                juce::AudioBuffer<float> view (out.getArrayOfWritePointers(), 2, pos, len);
+                fx->processBlock (view, m);
+            }
+            return out;
+        };
+        auto seg = [&] (const juce::AudioBuffer<float>& b, double from, double len) { juce::AudioBuffer<float> x (2, (int) (sr * len)); for (int c = 0; c < 2; ++c) x.copyFrom (c, 0, b, c, (int) (sr * from), x.getNumSamples()); return x; };
+        auto rms = [&] (const juce::AudioBuffer<float>& b, double from, double len) { return juce::jmax (b.getRMSLevel (0, (int) (sr * from), (int) (sr * len)), b.getRMSLevel (1, (int) (sr * from), (int) (sr * len))); };
+        auto loadPreset = [&] (const juce::File& f, const juce::String& prefix) -> int
+        {
+            juce::String e;
+            if (! rs::multiSamplerLoadNow (fx.get(), f, e, 0)) { std::cout << "load failed: " << e << "\n"; return -1; }
+            auto in = rs::multiSamplerInstrument (fx.get());
+            for (int i = 0; i < in->sf2Presets.size(); ++i) if (in->sf2Presets[i].startsWith (prefix)) { rs::multiSamplerLoadNow (fx.get(), f, e, i); return i; }
+            return -1;
+        };
+        const juce::File gm (argv[2]);
+        const auto t0 = juce::Time::getMillisecondCounterHiRes();
+        const int piano = loadPreset (gm, "000:000");
+        auto in = rs::multiSamplerInstrument (fx.get());
+        if (in == nullptr) return 1;
+        std::cout << "GM bank: " << in->sf2Presets.size() << " presets, first \"" << in->sf2Presets[0] << "\"; piano preset " << piano << " \"" << in->name << "\" " << in->zones.size()
+                  << " zones, " << in->velocityLayers << " layers, " << in->bytes / (1024 * 1024) << " MB, in " << (juce::Time::getMillisecondCounterHiRes() - t0) / 1000.0 << " s\n";
+        {
+            auto soft = play ({ { 0.0, 60, 0.3f, true }, { 1.5, 60, 0.3f, false } }, 2.0);
+            auto hard = play ({ { 0.0, 60, 1.0f, true }, { 1.5, 60, 1.0f, false } }, 2.0);
+            const double f = rs::msamp::detectPitchHz (seg (hard, 0.1, 0.6), sr);
+            std::cout << "piano C4: " << f << " Hz, soft " << juce::Decibels::gainToDecibels (rms (soft, 0.02, 0.3)) << " dB, hard " << juce::Decibels::gainToDecibels (rms (hard, 0.02, 0.3)) << " dB, after release " << juce::Decibels::gainToDecibels (rms (hard, 1.9, 0.1), -120.0f) << " dB\n";
+            ok = ok && std::abs (1200 * std::log2 (f / 261.63)) < 15 && rms (hard, 0.02, 0.3) > rms (soft, 0.02, 0.3) * 1.5 && rms (hard, 1.9, 0.1) < rms (hard, 1.4, 0.1) * 0.7f;
+            auto a4 = play ({ { 0.0, 69, 0.8f, true }, { 1.0, 69, 0.8f, false } }, 1.3);
+            const double fa = rs::msamp::detectPitchHz (seg (a4, 0.1, 0.6), sr);
+            std::cout << "piano A4: " << fa << " Hz\n";
+            ok = ok && std::abs (1200 * std::log2 (fa / 440.0)) < 15;
+        }
+        {
+            const int strings = loadPreset (gm, "000:048");
+            auto in2 = rs::multiSamplerInstrument (fx.get());
+            auto held = play ({ { 0.0, 64, 0.8f, true }, { 5.5, 64, 0.8f, false } }, 6.5);
+            int shortest = 1 << 30; bool looped = false;
+            for (auto& z : in2->zones) { shortest = juce::jmin (shortest, z.sample->buffer.getNumSamples()); looped = looped || z.loopEnd > 0; }
+            std::cout << "strings (" << strings << " \"" << in2->name << "\"): loops " << looped << ", still sounding at 5 s: " << juce::Decibels::gainToDecibels (rms (held, 5.0, 0.4)) << " dB; release envelope " << fx->state.getParameter ("release")->getCurrentValueAsText() << "\n";
+            ok = ok && looped && rms (held, 5.0, 0.4) > 0.01f;
+        }
+        {
+            const int drums = loadPreset (gm, "128:000");
+            auto in3 = rs::multiSamplerInstrument (fx.get());
+            auto d = play ({ { 0.0, 36, 1.0f, true }, { 0.1, 36, 1.0f, false }, { 0.5, 38, 1.0f, true }, { 0.6, 38, 1.0f, false }, { 1.0, 42, 1.0f, true }, { 1.1, 42, 1.0f, false } }, 1.5);
+            std::cout << "drums (" << drums << " \"" << in3->name << "\", " << in3->zones.size() << " zones): kick " << juce::Decibels::gainToDecibels (rms (d, 0.0, 0.2)) << " dB, snare " << juce::Decibels::gainToDecibels (rms (d, 0.5, 0.2)) << " dB, hat " << juce::Decibels::gainToDecibels (rms (d, 1.0, 0.1)) << " dB\n";
+            ok = ok && drums >= 0 && rms (d, 0.0, 0.2) > 0.02f && rms (d, 0.5, 0.2) > 0.02f && rms (d, 1.0, 0.1) > 0.005f;
+        }
+        if (argc > 3)
+        {
+            const juce::File small (argv[3]);
+            juce::String e;
+            const bool loadedSmall = rs::multiSamplerLoadNow (fx.get(), small, e, 0);
+            if (! loadedSmall) std::cout << "small bank preset 0: " << e << "\n";
+            auto in4 = rs::multiSamplerInstrument (fx.get());
+            int playable = 0;
+            int failed = 0;
+            for (int i = 0; in4 && i < in4->sf2Presets.size(); ++i)
+            {
+                if (! rs::multiSamplerLoadNow (fx.get(), small, e, i)) { if (failed++ < 3) std::cout << "  preset " << i << ": " << e << "\n"; continue; }
+                auto o = play ({ { 0.0, 60, 0.8f, true }, { 0.5, 60, 0.8f, false } }, 0.8);
+                bool fin = true; for (int c = 0; c < 2; ++c) for (int k = 0; k < o.getNumSamples(); ++k) fin = fin && std::isfinite (o.getSample (c, k));
+                if (fin && rms (o, 0.0, 0.5) > 0.001f) ++playable;
+                ok = ok && fin;
+            }
+            std::cout << "small bank: " << (in4 ? in4->sf2Presets.size() : 0) << " presets, " << playable << " sound\n";
+        }
+        if (argc > 4)
+        {
+            // a little demo: piano chords, strings and drums
+            juce::AudioBuffer<float> mix (2, (int) (sr * 8)); mix.clear();
+            auto addPart = [&] (const juce::String& prefix, std::vector<Ev> ev, float gain)
+            {
+                loadPreset (gm, prefix);
+                auto o = play (ev, 8.0);
+                for (int c = 0; c < 2; ++c) mix.addFrom (c, 0, o, c, 0, o.getNumSamples(), gain);
+            };
+            std::vector<Ev> pianoEv, strEv, drumEv;
+            const int chords[4][4] { { 48, 60, 64, 67 }, { 45, 57, 60, 64 }, { 41, 57, 60, 65 }, { 43, 55, 59, 62 } };
+            for (int c = 0; c < 4; ++c)
+                for (int r = 0; r < 4; ++r)
+                    for (int k = 0; k < 4; ++k) { const double t = c * 2.0 + r * 0.5; pianoEv.push_back ({ t, chords[c][k] + (k == 0 ? 0 : 12), 0.55f + 0.1f * (r == 0), true }); pianoEv.push_back ({ t + 0.45, chords[c][k] + (k == 0 ? 0 : 12), 0.5f, false }); }
+            for (int c = 0; c < 4; ++c) for (int k = 1; k < 4; ++k) { strEv.push_back ({ c * 2.0, chords[c][k], 0.6f, true }); strEv.push_back ({ c * 2.0 + 1.95, chords[c][k], 0.6f, false }); }
+            for (int b = 0; b < 16; ++b)
+            {
+                const double t = b * 0.5;
+                drumEv.push_back ({ t, b % 2 == 0 ? 36 : 38, 0.9f, true }); drumEv.push_back ({ t + 0.1, b % 2 == 0 ? 36 : 38, 0.9f, false });
+                drumEv.push_back ({ t, 42, 0.6f, true }); drumEv.push_back ({ t + 0.05, 42, 0.6f, false });
+                drumEv.push_back ({ t + 0.25, 42, 0.45f, true }); drumEv.push_back ({ t + 0.3, 42, 0.45f, false });
+            }
+            addPart ("000:000", pianoEv, 0.8f);
+            addPart ("000:048", strEv, 0.5f);
+            addPart ("128:000", drumEv, 0.7f);
+            const float pk = mix.getMagnitude (0, mix.getNumSamples());
+            if (pk > 0) mix.applyGain (0.8f / pk);
+            juce::String err;
+            rs::exporter::write (mix, sr, {}, {}, juce::File (argv[4]), err);
+            std::cout << "demo written\n";
+        }
+        if (argc > 5)
+        {
+            loadPreset (gm, "000:000");
+            std::unique_ptr<juce::AudioProcessorEditor> ed (fx->createEditor());
+            juce::MidiBuffer m;
+            for (int nn : { 48, 60, 64, 67 }) m.addEvent (juce::MidiMessage::noteOn (1, nn, (uint8_t) 100), 0);
+            juce::AudioBuffer<float> b (2, block);
+            fx->processBlock (b, m);
+            for (int f = 0; f < 5; ++f) { juce::MidiBuffer none; fx->processBlock (b, none); }
+            auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);
+            juce::File pf (argv[5]); pf.deleteFile();
+            juce::FileOutputStream os (pf);
+            juce::PNGImageFormat().writeImageToStream (img, os);
+        }
+        std::cout << (ok ? "SF2 OK\n" : "SF2 FAILED\n");
+        return ok ? 0 : 1;
+    }
+
+    if (argc >= 3 && juce::String (argv[1]) == "--keysdemo")
+    {
+        // short listening demos of the Organ, Electric Piano and Acid Bass (into the folder argv[2])
+        juce::ScopedJuceInitialiser_GUI gui;
+        const double sr = 48000; const int block = 512;
+        const juce::File dir (argv[2]); dir.createDirectory();
+        auto setP = [] (rs::BuiltinFx& fx, const char* id, float v) { auto* p = fx.state.getParameter (id); p->setValueNotifyingHost (p->convertTo0to1 (v)); };
+        struct Ev { double t; juce::MidiMessage m; };
+        auto render = [&] (rs::BuiltinFx& fx, std::vector<Ev> ev, double secs, juce::AudioPlayHead* head = nullptr, rs::BuiltinFx* after = nullptr)
+        {
+            juce::AudioBuffer<float> out (2, (int) (sr * secs));
+            out.clear();
+            fx.setPlayConfigDetails (2, 2, sr, block); fx.prepareToPlay (sr, block);
+            if (after) { after->setPlayConfigDetails (2, 2, sr, block); after->prepareToPlay (sr, block); }
+            fx.setPlayHead (head);
+            for (int pos = 0; pos < out.getNumSamples(); pos += block)
+            {
+                const int len = juce::jmin (block, out.getNumSamples() - pos);
+                juce::MidiBuffer m;
+                for (auto& e : ev) { const int at = (int) (e.t * sr); if (at >= pos && at < pos + len) m.addEvent (e.m, at - pos); }
+                juce::AudioBuffer<float> view (out.getArrayOfWritePointers(), 2, pos, len);
+                if (head) static_cast<void> (0);
+                fx.processBlock (view, m);
+                if (after) { juce::MidiBuffer none; after->processBlock (view, none); }
+            }
+            fx.setPlayHead (nullptr);
+            const float pk = out.getMagnitude (0, out.getNumSamples());
+            if (pk > 0) out.applyGain (0.8f / pk);
+            return out;
+        };
+        auto save = [&] (const juce::AudioBuffer<float>& b, const char* name) { juce::String e; rs::exporter::write (b, sr, {}, {}, dir.getChildFile (name), e); };
+        auto on = [] (double t, int n, int v) { return Ev { t, juce::MidiMessage::noteOn (1, n, (uint8_t) v) }; };
+        auto off = [] (double t, int n) { return Ev { t, juce::MidiMessage::noteOff (1, n) }; };
+        {
+            // organ: a gospel-ish phrase, the rotary speeding up half way (mod wheel)
+            auto org = rs::createOrgan();
+            static_cast<rs::BuiltinFx&> (*org);
+            for (int i = 0; i < 9; ++i) setP (*org, (juce::String ("db") + juce::String (i + 1)).toRawUTF8(), (float) ("888600000"[i] - '0'));
+            std::vector<Ev> ev;
+            const int chords[4][4] { { 48, 60, 64, 67 }, { 53, 60, 65, 69 }, { 55, 62, 67, 71 }, { 48, 60, 64, 72 } };
+            for (int c = 0; c < 4; ++c) for (int k = 0; k < 4; ++k) { ev.push_back (on (c * 1.5, chords[c][k], 100)); ev.push_back (off (c * 1.5 + 1.4, chords[c][k])); }
+            const int run[] { 72, 74, 76, 79, 81, 79, 76, 74, 72 };
+            for (int k = 0; k < 9; ++k) { ev.push_back (on (6.0 + k * 0.15, run[k], 100)); ev.push_back (off (6.0 + k * 0.15 + 0.12, run[k])); }
+            ev.push_back (on (7.5, 48, 100)); ev.push_back (on (7.5, 60, 100)); ev.push_back (on (7.5, 64, 100)); ev.push_back (on (7.5, 67, 100)); ev.push_back (on (7.5, 72, 100));
+            ev.push_back ({ 3.0, juce::MidiMessage::controllerEvent (1, 1, 127) });
+            for (int nn : { 48, 60, 64, 67, 72 }) ev.push_back (off (10.0, nn));
+            save (render (*org, ev, 11.0), "organ.wav");
+        }
+        {
+            // electric piano: soft then hard chords, with the shimmer reverb behind
+            auto ep = rs::createEPiano();
+            auto rev = rs::createShimmer();
+            setP (*rev, "mix", 22); setP (*rev, "shimmer", 30);
+            std::vector<Ev> ev;
+            const int chords[4][4] { { 50, 60, 65, 69 }, { 55, 59, 65, 69 }, { 48, 59, 64, 67 }, { 45, 57, 64, 67 } };
+            for (int c = 0; c < 4; ++c) for (int k = 0; k < 4; ++k) { ev.push_back (on (c * 1.6 + k * 0.02, chords[c][k], 45 + 25 * (c % 2))); ev.push_back (off (c * 1.6 + 1.5, chords[c][k])); }
+            const int mel[] { 72, 74, 76, 77, 76, 72, 74, 69 };
+            for (int k = 0; k < 8; ++k) { ev.push_back (on (6.4 + k * 0.3, mel[k], 115)); ev.push_back (off (6.4 + k * 0.3 + 0.25, mel[k])); }
+            save (render (*ep, ev, 10.0, nullptr, rev.get()), "epiano.wav");
+        }
+        {
+            // acid bass: its own pattern, 4 bars at 128 bpm, the filter opening up
+            struct Head : juce::AudioPlayHead
+            {
+                double ppq = 0;
+                juce::Optional<PositionInfo> getPosition() const override { PositionInfo p; p.setBpm (128.0); p.setPpqPosition (ppq); p.setIsPlaying (true); return p; }
+            } head;
+            auto ab = rs::createAcidBass();
+            setP (*ab, "seq", 1);
+            juce::AudioBuffer<float> out (2, (int) (sr * 7.5)); out.clear();
+            ab->setPlayConfigDetails (2, 2, sr, block); ab->prepareToPlay (sr, block); ab->setPlayHead (&head);
+            for (int pos = 0; pos < out.getNumSamples(); pos += block)
+            {
+                const int len = juce::jmin (block, out.getNumSamples() - pos);
+                head.ppq = pos / sr * 128.0 / 60.0;
+                const float t = (float) pos / out.getNumSamples();
+                setP (*ab, "cutoff", 15.0f + 45.0f * t); setP (*ab, "envmod", 40.0f + 40.0f * t);
+                juce::AudioBuffer<float> view (out.getArrayOfWritePointers(), 2, pos, len);
+                juce::MidiBuffer none;
+                ab->processBlock (view, none);
+            }
+            ab->setPlayHead (nullptr);
+            const float pk = out.getMagnitude (0, out.getNumSamples()); if (pk > 0) out.applyGain (0.8f / pk);
+            save (out, "acid.wav");
+        }
+        std::cout << "demos written\n";
+        return 0;
+    }
+
+    if (argc >= 2 && juce::String (argv[1]) == "--keys")
+    {
+        // Organ, Electric Piano, Acid Bass and the fourth set of effects
+        juce::ScopedJuceInitialiser_GUI gui;
+        const double sr = 48000; const int block = 512;
+        bool ok = true;
+        auto setP = [] (rs::BuiltinFx& fx, const char* id, float v) { auto* p = fx.state.getParameter (id); p->setValueNotifyingHost (p->convertTo0to1 (v)); };
+        struct Ev { double t; int note; float vel; bool on; };
+        auto render = [&] (rs::BuiltinFx& fx, std::vector<Ev> ev, double secs, juce::AudioBuffer<float>* input = nullptr)
+        {
+            juce::AudioBuffer<float> out (2, (int) (sr * secs));
+            out.clear();
+            if (input) for (int c = 0; c < 2; ++c) out.copyFrom (c, 0, *input, c, 0, juce::jmin (input->getNumSamples(), out.getNumSamples()));
+            fx.setPlayConfigDetails (2, 2, sr, block);
+            fx.prepareToPlay (sr, block);
+            for (int pos = 0; pos < out.getNumSamples(); pos += block)
+            {
+                const int len = juce::jmin (block, out.getNumSamples() - pos);
+                juce::MidiBuffer m;
+                for (auto& e : ev) { const int at = (int) (e.t * sr); if (at >= pos && at < pos + len) m.addEvent (e.on ? juce::MidiMessage::noteOn (1, e.note, e.vel) : juce::MidiMessage::noteOff (1, e.note), at - pos); }
+                juce::AudioBuffer<float> view (out.getArrayOfWritePointers(), 2, pos, len);
+                fx.processBlock (view, m);
+            }
+            return out;
+        };
+        auto seg = [&] (const juce::AudioBuffer<float>& b, double from, double len) { juce::AudioBuffer<float> s (2, (int) (sr * len)); for (int c = 0; c < 2; ++c) s.copyFrom (c, 0, b, c, (int) (sr * from), s.getNumSamples()); return s; };
+        auto pitch = [&] (const juce::AudioBuffer<float>& b, double from) { return rs::msamp::detectPitchHz (seg (b, from, 0.5), sr); };
+        auto rms = [&] (const juce::AudioBuffer<float>& b, double from, double len) { return b.getRMSLevel (0, (int) (sr * from), (int) (sr * len)); };
+        auto finite = [&] (const juce::AudioBuffer<float>& b) { for (int c = 0; c < 2; ++c) for (int i = 0; i < b.getNumSamples(); ++i) if (! std::isfinite (b.getSample (c, i))) return false; return true; };
+        // the energy at one frequency (a single DFT bin)
+        auto energyAt = [&] (const juce::AudioBuffer<float>& b, double from, double len, double hz)
+        {
+            double re = 0, im = 0; const int a = (int) (sr * from), n = (int) (sr * len);
+            for (int i = 0; i < n; ++i) { const double w = 0.5 - 0.5 * std::cos (juce::MathConstants<double>::twoPi * i / n); const double v = 0.5 * (b.getSample (0, a + i) + b.getSample (1, a + i)) * w; re += v * std::cos (juce::MathConstants<double>::twoPi * hz * i / sr); im += v * std::sin (juce::MathConstants<double>::twoPi * hz * i / sr); }
+            return std::sqrt (re * re + im * im) / n;
+        };
+
+        // ---- ORGAN ----
+        {
+            auto org = rs::createOrgan();
+            for (int i = 0; i < 9; ++i) setP (*org, (juce::String ("db") + juce::String (i + 1)).toRawUTF8(), i == 2 ? 8.0f : 0.0f);   // only the 8'
+            setP (*org, "perc", 0); setP (*org, "rotary", 0); setP (*org, "vibrato", 0); setP (*org, "drive", 0); setP (*org, "click", 0); setP (*org, "tone", 100);
+            auto b = render (*org, { { 0.05, 60, 0.8f, true }, { 1.0, 60, 0.8f, false } }, 1.3);
+            const double f = pitch (b, 0.3);
+            const double fund = energyAt (b, 0.3, 0.5, 261.63), h2 = energyAt (b, 0.3, 0.5, 523.25), h3 = energyAt (b, 0.3, 0.5, 784.9);
+            std::cout << "organ 8' only, C4: " << f << " Hz, 2nd harmonic " << juce::Decibels::gainToDecibels ((float) (h2 / fund)) << " dB, 3rd " << juce::Decibels::gainToDecibels ((float) (h3 / fund)) << " dB; after release " << juce::Decibels::gainToDecibels (rms (b, 1.1, 0.15), -120.0f) << " dB\n";
+            ok = ok && std::abs (f - 261.63) < 1.5 && h2 / fund < 0.05 && rms (b, 1.1, 0.15) < 1e-4f && finite (b);
+            // 16' and 5 1/3' land an octave below and a fifth above
+            for (int i = 0; i < 9; ++i) setP (*org, (juce::String ("db") + juce::String (i + 1)).toRawUTF8(), i == 0 || i == 1 ? 8.0f : 0.0f);
+            auto b2 = render (*org, { { 0.05, 60, 0.8f, true } }, 0.8);
+            std::cout << "organ 16' + 5 1/3': at 130.8 Hz " << energyAt (b2, 0.3, 0.4, 130.81) << ", at 392 Hz " << energyAt (b2, 0.3, 0.4, 392.0) << ", at 261.6 Hz " << energyAt (b2, 0.3, 0.4, 261.63) << "\n";
+            ok = ok && energyAt (b2, 0.3, 0.4, 130.81) > 0.01 && energyAt (b2, 0.3, 0.4, 392.0) > 0.01 && energyAt (b2, 0.3, 0.4, 261.63) < 0.002;
+            // percussion: the 3rd harmonic (2 2/3') rings out on a detached note, not on a legato one
+            for (int i = 0; i < 9; ++i) setP (*org, (juce::String ("db") + juce::String (i + 1)).toRawUTF8(), i == 2 ? 8.0f : 0.0f);
+            setP (*org, "perc", 1); setP (*org, "percharm", 1);
+            auto b3 = render (*org, { { 0.05, 60, 0.8f, true }, { 0.6, 64, 0.8f, true } }, 1.2);
+            const double p0 = energyAt (b3, 0.06, 0.1, 784.9), p1 = energyAt (b3, 0.45, 0.1, 784.9), p2 = energyAt (b3, 0.62, 0.1, 1244.5);
+            std::cout << "organ percussion: 3rd harmonic at the start " << p0 << ", 0.4 s later " << p1 << ", legato note's percussion " << p2 << "\n";
+            ok = ok && p0 > p1 * 4 && p2 < p0 * 0.25;
+            // full drawbars, a chord, rotary on: wide stereo, finite
+            for (int i = 0; i < 9; ++i) setP (*org, (juce::String ("db") + juce::String (i + 1)).toRawUTF8(), 8.0f);
+            setP (*org, "rotary", 2); setP (*org, "vibrato", 6); setP (*org, "drive", 60); setP (*org, "click", 80);
+            auto b4 = render (*org, { { 0.0, 48, 1.0f, true }, { 0.0, 60, 1.0f, true }, { 0.0, 64, 1.0f, true }, { 0.0, 67, 1.0f, true }, { 0.0, 72, 1.0f, true } }, 1.5);
+            double diff = 0; for (int i = 0; i < b4.getNumSamples(); ++i) diff += std::abs (b4.getSample (0, i) - b4.getSample (1, i));
+            std::cout << "organ full + chord + rotary: peak " << b4.getMagnitude (0, b4.getNumSamples()) << ", L/R differ by " << diff / b4.getNumSamples() << "\n";
+            ok = ok && finite (b4) && b4.getMagnitude (0, b4.getNumSamples()) < 1.5f && diff / b4.getNumSamples() > 0.005;
+        }
+        // ---- ELECTRIC PIANO ----
+        {
+            auto ep = rs::createEPiano();
+            setP (*ep, "tremdepth", 0);
+            auto soft = render (*ep, { { 0.0, 57, 0.25f, true }, { 2.5, 57, 0.25f, false } }, 3.0);
+            auto hard = render (*ep, { { 0.0, 57, 1.0f, true }, { 2.5, 57, 1.0f, false } }, 3.0);
+            const double f = pitch (soft, 0.4);
+            // brightness: harmonics over the fundamental
+            auto bright = [&] (const juce::AudioBuffer<float>& b) { return (energyAt (b, 0.05, 0.3, 440.0) + energyAt (b, 0.05, 0.3, 660.0)) / energyAt (b, 0.05, 0.3, 220.0); };
+            std::cout << "epiano A3: " << f << " Hz; soft " << juce::Decibels::gainToDecibels (rms (soft, 0.05, 0.3)) << " dB, hard " << juce::Decibels::gainToDecibels (rms (hard, 0.05, 0.3))
+                      << " dB; harmonics soft " << bright (soft) << " hard " << bright (hard) << "; decays " << juce::Decibels::gainToDecibels (rms (hard, 2.0, 0.3) / rms (hard, 0.1, 0.3))
+                      << " dB by 2 s; after release " << juce::Decibels::gainToDecibels (rms (hard, 2.85, 0.1), -120.0f) << " dB\n";
+            ok = ok && std::abs (f - 220.0) < 2 && rms (hard, 0.05, 0.3) > rms (soft, 0.05, 0.3) * 2 && bright (hard) > bright (soft) * 1.3
+                    && rms (hard, 2.0, 0.3) < rms (hard, 0.1, 0.3) && rms (hard, 2.85, 0.1) < rms (hard, 2.0, 0.3) * 0.05 && finite (hard);
+            setP (*ep, "model", 1);
+            auto reed = render (*ep, { { 0.0, 57, 0.9f, true }, { 1.0, 57, 0.9f, false } }, 1.3);
+            std::cout << "epiano reed A3: " << pitch (reed, 0.2) << " Hz\n";
+            ok = ok && std::abs (pitch (reed, 0.2) - 220.0) < 2 && finite (reed);
+        }
+        // ---- ACID BASS ----
+        {
+            auto ab = rs::createAcidBass();
+            setP (*ab, "seq", 0);
+            auto b = render (*ab, { { 0.0, 45, 0.6f, true }, { 0.5, 45, 0.6f, false } }, 0.8);
+            std::cout << "acid A2: " << pitch (b, 0.05) << " Hz, after release " << juce::Decibels::gainToDecibels (rms (b, 0.6, 0.1), -120.0f) << " dB\n";
+            ok = ok && std::abs (pitch (b, 0.05) - 110.0) < 2 && rms (b, 0.6, 0.1) < 1e-3f;
+            // legato slides into the next note (measured on a plain tone)
+            setP (*ab, "reso", 0); setP (*ab, "envmod", 0); setP (*ab, "cutoff", 100);
+            auto s = render (*ab, { { 0.0, 45, 0.6f, true }, { 0.3, 52, 0.6f, true }, { 0.6, 45, 0.6f, false }, { 0.6, 52, 0.6f, false } }, 0.8);
+            const double pa = rs::msamp::detectPitchHz (seg (s, 0.02, 0.26), sr), pb = rs::msamp::detectPitchHz (seg (s, 0.36, 0.24), sr);
+            std::cout << "acid slide: " << pa << " Hz then " << pb << " Hz\n";
+            ok = ok && std::abs (pb - 164.8) < 4 && std::abs (pa - 110) < 2;
+            // the sequencer, running with the song (a fake playhead at 120 bpm)
+            struct Head : juce::AudioPlayHead
+            {
+                double ppq = 0; bool playing = true;
+                juce::Optional<PositionInfo> getPosition() const override { PositionInfo p; p.setBpm (120.0); p.setPpqPosition (ppq); p.setIsPlaying (playing); return p; }
+            } head;
+            setP (*ab, "seq", 1);
+            setP (*ab, "reso", 0); setP (*ab, "envmod", 0); setP (*ab, "cutoff", 100);   // a plain tone, to measure its pitch
+            ab->setPlayHead (&head);
+            ab->setPlayConfigDetails (2, 2, sr, block);
+            ab->prepareToPlay (sr, block);
+            juce::AudioBuffer<float> out (2, (int) (sr * 2.0));
+            for (int pos = 0; pos < out.getNumSamples(); pos += block)
+            {
+                const int len = juce::jmin (block, out.getNumSamples() - pos);
+                head.ppq = pos / sr * 2.0;   // 120 bpm = 2 beats a second
+                juce::AudioBuffer<float> view (out.getArrayOfWritePointers(), 2, pos, len);
+                juce::MidiBuffer none;
+                ab->processBlock (view, none);
+            }
+            // two bars of 16ths: 32 steps in 2 s; the first step plays the root (C2 = 65.4 Hz by default, root 36)
+            const double first = rs::msamp::detectPitchHz (seg (out, 0.0, 0.11), sr);
+            const float restLvl = rms (out, 5 * 0.125 + 0.02, 0.08);   // step 6 is a rest
+            std::cout << "acid sequencer: step 1 at " << first << " Hz, a rest step " << juce::Decibels::gainToDecibels (restLvl, -120.0f) << " dB, the pattern " << juce::Decibels::gainToDecibels (rms (out, 0, 2.0)) << " dB\n";
+            ok = ok && std::abs (first - 65.4) < 2 && restLvl < rms (out, 0, 2.0) * 0.2f && finite (out);
+            ab->setPlayHead (nullptr);
+        }
+        // ---- MULTIBAND: flat when nothing is compressed, and only the loud band is pulled down ----
+        {
+            auto mb = rs::createMultiband();
+            for (auto id : { "ratio1", "ratio2", "ratio3" }) setP (*mb, id, 1);
+            float worst = 0;
+            for (double hz : { 60.0, 220.0, 700.0, 3200.0, 9000.0 })
+            {
+                juce::AudioBuffer<float> in (2, (int) sr);
+                for (int i = 0; i < in.getNumSamples(); ++i) { const float v = 0.3f * (float) std::sin (juce::MathConstants<double>::twoPi * hz * i / sr); in.setSample (0, i, v); in.setSample (1, i, v); }
+                auto out = render (*mb, {}, 1.0, &in);
+                worst = juce::jmax (worst, std::abs (juce::Decibels::gainToDecibels (rms (out, 0.5, 0.4) / rms (in, 0.5, 0.4))));
+            }
+            std::cout << "multiband with ratio 1: flat within " << worst << " dB\n";
+            ok = ok && worst < 0.2f;
+            setP (*mb, "ratio1", 8); setP (*mb, "thr1", -30); setP (*mb, "ratio3", 1);
+            juce::AudioBuffer<float> in (2, (int) sr);
+            for (int i = 0; i < in.getNumSamples(); ++i) { const float v = 0.4f * (float) std::sin (juce::MathConstants<double>::twoPi * 60 * i / sr) + 0.1f * (float) std::sin (juce::MathConstants<double>::twoPi * 6000 * i / sr); in.setSample (0, i, v); in.setSample (1, i, v); }
+            auto out = render (*mb, {}, 1.0, &in);
+            const double low = energyAt (out, 0.5, 0.4, 60) / energyAt (in, 0.5, 0.4, 60), high = energyAt (out, 0.5, 0.4, 6000) / energyAt (in, 0.5, 0.4, 6000);
+            std::cout << "multiband: low band " << juce::Decibels::gainToDecibels ((float) low) << " dB, high band " << juce::Decibels::gainToDecibels ((float) high) << " dB\n";
+            ok = ok && low < 0.5 && std::abs (juce::Decibels::gainToDecibels ((float) high)) < 0.5f;
+        }
+        // ---- SHIMMER: an octave appears in the tail ----
+        {
+            double oct[2];
+            for (int pass = 0; pass < 2; ++pass)
+            {
+                auto sh = rs::createShimmer();
+                setP (*sh, "shimmer", pass == 0 ? 0.0f : 100.0f); setP (*sh, "mix", 100);
+                juce::AudioBuffer<float> in (2, (int) (sr * 3)); in.clear();
+                for (int i = 0; i < (int) (sr * 0.3); ++i) { const float v = 0.4f * (float) std::sin (juce::MathConstants<double>::twoPi * 330 * i / sr); in.setSample (0, i, v); in.setSample (1, i, v); }
+                auto out = render (*sh, {}, 3.0, &in);
+                oct[pass] = energyAt (out, 1.0, 1.0, 660) / juce::jmax (1e-9, energyAt (out, 1.0, 1.0, 330));
+                ok = ok && finite (out) && out.getMagnitude (0, out.getNumSamples()) < 2.0f;
+            }
+            std::cout << "shimmer: octave in the tail without " << oct[0] << ", with " << oct[1] << "\n";
+            ok = ok && oct[1] > oct[0] * 5;
+        }
+        // ---- TUNER ----
+        for (double hz : { 82.41, 110.0, 440.0, 329.63, 1046.5 })
+        {
+            auto tu = rs::createTuner();
+            juce::AudioBuffer<float> in (2, (int) sr);
+            for (int i = 0; i < in.getNumSamples(); ++i) { const float v = 0.3f * (float) (std::sin (juce::MathConstants<double>::twoPi * hz * i / sr) + 0.4 * std::sin (2 * juce::MathConstants<double>::twoPi * hz * i / sr)); in.setSample (0, i, v); in.setSample (1, i, v); }
+            auto out = render (*tu, {}, 1.0, &in);
+            const double got = tu->meterValue.load();
+            std::cout << "tuner " << hz << " Hz -> " << got << " Hz (" << 1200 * std::log2 (got / hz) << " cents)\n";
+            ok = ok && std::abs (1200 * std::log2 (got / hz)) < 2;
+        }
+        // ---- VOCAL REMOVER: a centred tone goes, a tone on one side stays (and the other way round) ----
+        for (int mode = 0; mode < 2; ++mode)
+        {
+            auto vr = rs::createVocalRemover();
+            setP (*vr, "mode", (float) mode);
+            juce::AudioBuffer<float> in (2, (int) (sr * 1.5));
+            for (int i = 0; i < in.getNumSamples(); ++i)
+            {
+                const float c = 0.3f * (float) std::sin (juce::MathConstants<double>::twoPi * 440 * i / sr), side = 0.3f * (float) std::sin (juce::MathConstants<double>::twoPi * 660 * i / sr);
+                in.setSample (0, i, c + side); in.setSample (1, i, c);
+            }
+            auto out = render (*vr, {}, 1.5, &in);
+            const int lat = vr->getLatencySamples();
+            const double centre = energyAt (out, 0.8, 0.5, 440) / energyAt (in, 0.8 - lat / sr, 0.5, 440), side = energyAt (out, 0.8, 0.5, 660) / energyAt (in, 0.8 - lat / sr, 0.5, 660);
+            std::cout << "vocal remover (" << (mode ? "keep centre" : "remove centre") << "): centre tone " << juce::Decibels::gainToDecibels ((float) centre, -100.0f) << " dB, side tone " << juce::Decibels::gainToDecibels ((float) side, -100.0f) << " dB\n";
+            ok = ok && (mode == 0 ? (centre < 0.1 && side > 0.7) : (centre > 0.7 && side < 0.2));
+        }
+        // ---- ANALYSER passes sound through untouched ----
+        {
+            auto an = rs::createAnalyzer();
+            juce::AudioBuffer<float> in (2, (int) sr);
+            juce::Random r (3);
+            for (int i = 0; i < in.getNumSamples(); ++i) { in.setSample (0, i, r.nextFloat() - 0.5f); in.setSample (1, i, r.nextFloat() - 0.5f); }
+            auto out = render (*an, {}, 1.0, &in);
+            float d = 0; for (int i = 0; i < in.getNumSamples(); ++i) d = juce::jmax (d, std::abs (out.getSample (0, i) - in.getSample (0, i)));
+            std::cout << "analyser changes the sound by " << d << "\n";
+            ok = ok && d < 1e-6f;
+        }
+        // Mixcraft's instruments find their RENASOUND counterparts
+        for (auto [name, want] : { std::pair<const char*, const char*> { "VB3 Organ", "organ" }, { "Combo Organ Model F", "organ" }, { "Combo Organ Model V", "organ" },
+                                   { "Lounge Lizard Electric Piano", "epiano" }, { "Alien 303 Bass Synthesizer", "acid" }, { "Messiah Version 2", "" },
+                                   { "MinimogueVA", "" }, { "Acoustica Studio Drums", "" } })
+        {
+            const auto got = rs::mixcraftCounterpart (name);
+            std::cout << "mixcraft \"" << name << "\" -> " << (got.isEmpty() ? juce::String ("(RENASYNTH / drums)") : got) << "\n";
+            ok = ok && got == want;
+        }
+        std::cout << (ok ? "KEYS OK\n" : "KEYS FAILED\n");
+        return ok ? 0 : 1;
+    }
+
     if (argc >= 2 && juce::String (argv[1]) == "--fx2")
     {
         juce::ScopedJuceInitialiser_GUI gui;
@@ -947,8 +1388,10 @@ int main (int argc, char** argv)
         {
             const char* id = idStr.toRawUTF8();
             auto fx = rs::createBuiltinFx (id);
-            const bool sung = idStr == "autotune", bass = idStr == "subbass";
-            double ph = 0;
+            const bool sung = idStr == "autotune" || idStr == "tuner", bass = idStr == "subbass";
+            const bool instrument = idStr == "organ" || idStr == "epiano" || idStr == "acid";
+            const bool stereo = idStr == "vocalremove" || idStr == "analyzer";
+            double ph = 0, ph2 = 0;
             auto set = [&] (const char* p, float v) { if (auto* q = fx->state.getParameter (p)) q->setValueNotifyingHost (q->convertTo0to1 (v)); };
             if (juce::String (id) == "eq") { set ("lowGain", 4); set ("midGain", -5); set ("midFreq", 900); set ("highGain", 3); set ("lowCut", 40); }
             if (juce::String (id) == "tubeeq") { set ("lowBoost", 6); set ("lowAtten", 3); set ("highBoost", 5); set ("drive", 6); }
@@ -964,6 +1407,9 @@ int main (int argc, char** argv)
             if (idStr == "bitcrusher") { set ("bits", 5); set ("rate", 3000); set ("drive", 12); }
             if (idStr == "limiter") { set ("gain", 10); }
             if (idStr == "rotary") { set ("speed", 1); }
+            if (idStr == "acid") { set ("seq", 0); }
+            if (idStr == "multiband") { set ("thr1", -30); set ("thr2", -28); set ("thr3", -40); }
+            if (idStr == "shimmer") { set ("mix", 60); }
             fx->setPlayConfigDetails (2, 2, sr, 512);
             fx->prepareToPlay (sr, 512);
             std::unique_ptr<juce::AudioProcessorEditor> ed (fx->createEditor());
@@ -984,9 +1430,19 @@ int main (int argc, char** argv)
                         const float tone = (float) std::sin (ph * juce::MathConstants<double>::twoPi);
                         const float v = sung ? 0.4f * tone + 0.003f * (rnd.nextFloat() * 2 - 1)
                                              : env * (0.5f * tone + 0.15f * (rnd.nextFloat() * 2 - 1)) + 0.002f * (rnd.nextFloat() * 2 - 1);
-                        buf.setSample (0, i, v); buf.setSample (1, i, v);
+                        ph2 += 523.25 / sr;
+                        const float other = stereo ? 0.25f * (float) std::sin (ph2 * juce::MathConstants<double>::twoPi) : 0.0f;
+                        buf.setSample (0, i, instrument ? 0.0f : v + other); buf.setSample (1, i, instrument ? 0.0f : v);
                     }
                     juce::MidiBuffer mb;
+                    if (instrument)
+                    {
+                        // a chord on the keys (the bass: a short line)
+                        const long long start = n - 512;
+                        const int frameNo = (int) (start / 512);
+                        if (idStr == "acid") { static const int line[] { 36, 36, 48, 39, 36, 43, 46, 36 }; if (frameNo % 6 == 0) { mb.addEvent (juce::MidiMessage::noteOn (1, line[(frameNo / 6) % 8], (uint8_t) ((frameNo / 6) % 3 == 0 ? 120 : 80)), 0); } if (frameNo % 6 == 4) for (int k = 0; k < 128; ++k) mb.addEvent (juce::MidiMessage::noteOff (1, k), 0); }
+                        else if (frameNo == 0) for (int note : { 48, 55, 60, 64, 67, 71 }) mb.addEvent (juce::MidiMessage::noteOn (1, note, (uint8_t) 105), 0);
+                    }
                     fx->processBlock (buf, mb);
                 }
                 auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);

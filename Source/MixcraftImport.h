@@ -9,12 +9,17 @@
 //    - audio tracks and MIDI tracks: names, volume, pan, mute
 //    - audio clips: position, length, trim, with crossfades where clips overlap
 //    - MIDI clips and their notes (looped clips are unrolled)
-//  What can't: Mixcraft's own instruments and effects (RENASOUND sounds are
-//  picked instead), automation, Melodyne data.
+//  Mixcraft's bundled organs, electric pianos and 303 bass are played by their
+//  RENASOUND counterparts (Organ, Electric Piano, Acid Bass); other instruments
+//  get a RENASYNTH sound or RENASOUND Drums.
+//  What can't: Mixcraft's effects, automation, Melodyne data.
 // =============================================================================
 
 namespace rs
 {
+
+// The RENASOUND instrument that stands in for a Mixcraft instrument ("organ", "epiano", "acid"), or empty
+juce::String mixcraftCounterpart (const juce::String& mixcraftInstrumentName);
 
 // The result of converting another DAW's project (Mixcraft, Ableton Live...)
 struct DawImport

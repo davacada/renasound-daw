@@ -95,6 +95,15 @@ std::unique_ptr<BuiltinFx> createDubDelay();
 std::unique_ptr<BuiltinFx> createLimiter();
 std::unique_ptr<BuiltinFx> createRingMod();
 std::unique_ptr<BuiltinFx> createSubBass();
+std::unique_ptr<BuiltinFx> createOrgan();
+std::unique_ptr<BuiltinFx> createEPiano();
+std::unique_ptr<BuiltinFx> createAcidBass();
+std::unique_ptr<BuiltinFx> createMultiband();
+std::unique_ptr<BuiltinFx> createShimmer();
+std::unique_ptr<BuiltinFx> createTuner();
+std::unique_ptr<BuiltinFx> createAnalyzer();
+std::unique_ptr<BuiltinFx> createVocalRemover();
+juce::AudioProcessorEditor* createFaceplate4 (BuiltinFx&);
 std::unique_ptr<BuiltinFx> createTubeEq();
 
 } // namespace rs

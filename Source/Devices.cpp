@@ -1924,7 +1924,10 @@ const std::vector<BuiltinFxInfo>& getBuiltinInstrumentList()
         { "kick",    "Kick Synth", "Synthesised kicks: big room, 808, techno" },
         { "vocoder", "Vocoder",    "Play chords through your vocal (pick the vocal track as modulator)" },
         { "sampler", "Sampler",    "Play any sound across the keyboard: drop a file or a Library sound on it" },
-        { "multisampler", "Multi Sampler", "A real sampled instrument: a folder of notes, an SFZ or a sample library" } };
+        { "multisampler", "Multi Sampler", "A real sampled instrument: a folder of notes, an SFZ or a sample library" },
+        { "organ",   "Organ",          "Tonewheel or combo organ: drawbars, percussion, key click, vibrato and a rotary speaker" },
+        { "epiano",  "Electric Piano", "Tine or reed electric piano with bell, bark and tremolo" },
+        { "acid",    "Acid Bass",      "Squelchy bass with accent, slide and a 16-step sequencer" } };
     return list;
 }
 

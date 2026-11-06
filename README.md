@@ -6,6 +6,16 @@ A Mixcraft-style music DAW for **macOS and Windows**, written in C++ with JUCE.
 
 ![RENASOUND](docs/screenshot.png)
 
+## What's new in 0.14
+
+- **Three new instruments**, each with its own live panel:
+  - **Organ**: 91 phase-locked tonewheels (chords beat like the real thing) with 9 drawbars you pull out, percussion (second or third, fast or slow, single-trigger), key click, vibrato / chorus, drive and the built-in rotary speaker (the mod wheel switches it to fast). Two combo-organ voices too, and one-click registrations (Jazz, Gospel, Full ...).
+  - **Electric Piano**: tine or reed, built from decaying partials through a pickup that barks when you play hard; bell, decay, release, tone, drive, and autopan (tines) or tremolo (reeds). The panel shows every tine vibrating.
+  - **Acid Bass**: saw or square into a squelchy four-pole filter with accent and slide, and a 16-step sequencer that follows the song (a held key transposes it), or play it from the keys (legato slides, hard notes accent).
+- **Five new effects**: **Multiband Compressor** (three bands, crossovers you drag), **Shimmer Reverb** (octaves or fifths rising, or falling, inside the reverb), **Tuner**, **Spectrum Analyser**, and **Vocal Remover** (take out, or keep only, what's in the centre of a mix).
+- **Multi Sampler plays SoundFonts (.sf2)**: every preset of the bank in a menu, with its zones, velocity layers, loops, tuning, stereo pairs and envelope. Load your own General MIDI bank for pianos, strings, brass, guitars and drum kits.
+- **Mixcraft projects**: tracks that used Mixcraft's VB3 or Combo organs, Lounge Lizard electric piano or Alien 303 now open with the RENASOUND Organ, Electric Piano or Acid Bass, set up to match.
+
 ## What's new in 0.13
 
 - **Eleven new effects**, each with its own live panel, and the add-effect menu is now grouped (EQ & Tone, Dynamics, Vocal, Space, Modulation, Character):
@@ -276,8 +286,10 @@ Source/
   Faceplates.cpp      the faceplates of the original effects (EQ, compressor, reverb ...)
   Fx2.cpp             Auto-Tune, Bus Compressor, Color EQ, Voice Cleaner
   Fx3.cpp             Rotary, De-esser, Bit Crusher, Dub Delay, Limiter, Ring Mod, Sub Bass
+  Fx4.cpp             Multiband Compressor, Shimmer Reverb, Tuner, Spectrum Analyser, Vocal Remover
+  Keys.cpp            Organ, Electric Piano, Acid Bass
   SynthFx.cpp         RENASYNTH: oscillators, filters, envelopes, 2 LFOs, mod matrix, its panel
-  MultiSampler.*      the Multi Sampler: name mapping, SFZ, zones / layers / round robins, its panel
+  MultiSampler.*      the Multi Sampler: name mapping, SFZ, SoundFont (SF2), zones / layers / round robins, its panel
   NcwReader.h         reads NCW sample files
   Export.*            mixdown files: WAV / AIFF / FLAC / Ogg, tags and cover art
   DspHelpers.h        biquad filters and parameter helpers

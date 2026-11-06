@@ -598,14 +598,267 @@ InstrumentPtr loadSfz (const juce::File& sfz, std::atomic<float>* progress, juce
     return inst;
 }
 
-InstrumentPtr load (const juce::File& f, std::atomic<float>* progress, juce::String& error)
+// =============================================================================
+//  SoundFont (SF2)
+// =============================================================================
+namespace
 {
+    struct Sf2Header { std::string name; int start, end, loopStart, loopEnd, rate, root, corr, type; };
+    struct Sf2Gen { int oper; int amount; };   // amount: signed, or (lo | hi << 8) for ranges
+    struct Sf2Zone { std::vector<Sf2Gen> gens; };
+    struct Sf2Preset { std::string name; int program, bank; std::vector<Sf2Zone> zones; };
+    struct Sf2Inst { std::string name; std::vector<Sf2Zone> zones; };
+
+    struct Sf2File
+    {
+        juce::File file;
+        std::vector<int16_t> pcm;
+        std::vector<Sf2Header> samples;
+        std::vector<Sf2Preset> presets;   // sorted by bank, then program
+        std::vector<Sf2Inst> insts;
+        std::mutex m;
+        std::map<int, SamplePtr> converted;   // each sound turned into floats once, when a preset first uses it
+
+        SamplePtr sample (int idx)
+        {
+            const std::lock_guard<std::mutex> g (m);
+            if (auto it = converted.find (idx); it != converted.end()) return it->second;
+            const auto& h = samples[(size_t) idx];
+            const int len = juce::jmax (0, juce::jmin (h.end, (int) pcm.size()) - h.start);
+            auto smp = std::make_shared<SampleData>();
+            smp->file = file;
+            smp->rate = h.rate > 0 ? h.rate : 44100;
+            smp->buffer.setSize (2, juce::jmax (1, len));
+            smp->buffer.clear();
+            auto* d = smp->buffer.getWritePointer (0);
+            for (int i = 0; i < len; ++i) d[i] = pcm[(size_t) (h.start + i)] / 32768.0f;
+            smp->buffer.copyFrom (1, 0, smp->buffer, 0, 0, juce::jmax (1, len));
+            converted[idx] = smp;
+            return smp;
+        }
+    };
+
+    std::shared_ptr<Sf2File> openSf2 (const juce::File& f, juce::String& error)
+    {
+        static std::mutex cacheLock;
+        static std::map<juce::String, std::weak_ptr<Sf2File>> cache;
+        const auto key = f.getFullPathName() + "|" + juce::String (f.getLastModificationTime().toMilliseconds());
+        {
+            const std::lock_guard<std::mutex> g (cacheLock);
+            if (auto it = cache.find (key); it != cache.end()) if (auto p = it->second.lock()) return p;
+        }
+        juce::MemoryBlock mb;
+        if (! f.loadFileAsData (mb) || mb.getSize() < 12) { error = "Couldn't read " + f.getFileName(); return nullptr; }
+        const auto* d = (const uint8_t*) mb.getData();
+        const size_t size = mb.getSize();
+        auto u32 = [d] (size_t at) { return (uint32_t) d[at] | ((uint32_t) d[at + 1] << 8) | ((uint32_t) d[at + 2] << 16) | ((uint32_t) d[at + 3] << 24); };
+        auto u16 = [d] (size_t at) { return (uint16_t) (d[at] | (d[at + 1] << 8)); };
+        auto tag = [d] (size_t at) { return std::string ((const char*) d + at, 4); };
+        if (tag (0) != "RIFF" || tag (8) != "sfbk") { error = f.getFileName() + " isn't a SoundFont."; return nullptr; }
+        auto sf = std::make_shared<Sf2File>();
+        sf->file = f;
+        std::map<std::string, std::pair<size_t, size_t>> chunks;   // pdta sub-chunks and smpl: where and how big
+        size_t pos = 12;
+        while (pos + 8 <= size)
+        {
+            const auto id = tag (pos); const size_t len = u32 (pos + 4);
+            if (id == "LIST" && pos + 12 <= size)
+            {
+                const auto kind = tag (pos + 8);
+                size_t sub = pos + 12, endL = juce::jmin (size, pos + 8 + len);
+                while (sub + 8 <= endL)
+                {
+                    const auto sid = tag (sub); const size_t slen = u32 (sub + 4);
+                    if (sub + 8 + slen > size) break;
+                    if (kind == "sdta" || kind == "pdta") chunks[sid] = { sub + 8, slen };
+                    sub += 8 + slen + (slen & 1);
+                }
+            }
+            pos += 8 + len + (len & 1);
+        }
+        for (auto need : { "smpl", "phdr", "pbag", "pgen", "inst", "ibag", "igen", "shdr" })
+            if (! chunks.count (need)) { error = f.getFileName() + ": a damaged SoundFont (no " + need + ")."; return nullptr; }
+        {
+            auto [at, len] = chunks["smpl"];
+            sf->pcm.resize (len / 2);
+            std::memcpy (sf->pcm.data(), d + at, (len / 2) * 2);   // little-endian 16-bit, as on every platform we build for
+        }
+        auto readGens = [&] (const char* bagId, const char* genId, int first, int last, std::vector<Sf2Zone>& zones)
+        {
+            auto [bagAt, bagLen] = chunks[bagId]; auto [genAt, genLen] = chunks[genId];
+            const int bags = (int) (bagLen / 4), gens = (int) (genLen / 4);
+            for (int b = first; b < last && b + 1 < bags; ++b)
+            {
+                Sf2Zone z;
+                const int g0 = u16 (bagAt + (size_t) b * 4), g1 = u16 (bagAt + (size_t) (b + 1) * 4);
+                for (int gi = g0; gi < g1 && gi < gens; ++gi)
+                    z.gens.push_back ({ (int) u16 (genAt + (size_t) gi * 4), (int) (int16_t) u16 (genAt + (size_t) gi * 4 + 2) });
+                zones.push_back (std::move (z));
+            }
+        };
+        {
+            auto [at, len] = chunks["shdr"];
+            for (size_t r = 0; r + 1 < len / 46; ++r)   // (the last record is a terminator)
+            {
+                const size_t o = at + r * 46;
+                Sf2Header h;
+                h.name = std::string ((const char*) d + o, strnlen ((const char*) d + o, 20));
+                h.start = (int) u32 (o + 20); h.end = (int) u32 (o + 24); h.loopStart = (int) u32 (o + 28); h.loopEnd = (int) u32 (o + 32);
+                h.rate = (int) u32 (o + 36); h.root = d[o + 40]; h.corr = (int) (int8_t) d[o + 41]; h.type = u16 (o + 44);
+                sf->samples.push_back (h);
+            }
+        }
+        {
+            auto [at, len] = chunks["inst"];
+            const int n = (int) (len / 22);
+            for (int r = 0; r + 1 < n; ++r)
+            {
+                const size_t o = at + (size_t) r * 22;
+                Sf2Inst in;
+                in.name = std::string ((const char*) d + o, strnlen ((const char*) d + o, 20));
+                readGens ("ibag", "igen", u16 (o + 20), u16 (o + 22 + 20), in.zones);
+                sf->insts.push_back (std::move (in));
+            }
+        }
+        {
+            auto [at, len] = chunks["phdr"];
+            const int n = (int) (len / 38);
+            for (int r = 0; r + 1 < n; ++r)
+            {
+                const size_t o = at + (size_t) r * 38;
+                Sf2Preset p;
+                p.name = std::string ((const char*) d + o, strnlen ((const char*) d + o, 20));
+                p.program = u16 (o + 20); p.bank = u16 (o + 22);
+                readGens ("pbag", "pgen", u16 (o + 24), u16 (o + 38 + 24), p.zones);
+                sf->presets.push_back (std::move (p));
+            }
+            std::stable_sort (sf->presets.begin(), sf->presets.end(), [] (const Sf2Preset& a, const Sf2Preset& b) { return a.bank != b.bank ? a.bank < b.bank : a.program < b.program; });
+        }
+        if (sf->presets.empty()) { error = f.getFileName() + " has no presets."; return nullptr; }
+        const std::lock_guard<std::mutex> g (cacheLock);
+        cache[key] = sf;
+        return sf;
+    }
+
+    enum { G_StartOff = 0, G_EndOff = 1, G_LoopStartOff = 2, G_LoopEndOff = 3, G_StartCoarse = 4, G_EndCoarse = 12, G_Pan = 17,
+           G_Attack = 34, G_Decay = 36, G_Sustain = 37, G_Release = 38, G_Instrument = 41, G_KeyRange = 43, G_VelRange = 44,
+           G_LoopStartCoarse = 45, G_Atten = 48, G_LoopEndCoarse = 50, G_Coarse = 51, G_Fine = 52, G_SampleId = 53, G_Modes = 54,
+           G_ScaleTune = 56, G_RootKey = 58 };
+
+    const Sf2Gen* findGen (const Sf2Zone& z, int oper) { for (auto& g : z.gens) if (g.oper == oper) return &g; return nullptr; }
+}
+
+InstrumentPtr loadSf2 (const juce::File& file, int presetIndex, std::atomic<float>* progress, juce::String& error)
+{
+    auto sf = openSf2 (file, error);
+    if (sf == nullptr) return nullptr;
+    auto inst = std::make_shared<Instrument>();
+    inst->source = file;
+    for (auto& p : sf->presets)
+        inst->sf2Presets.add (juce::String (p.bank).paddedLeft ('0', 3) + ":" + juce::String (p.program).paddedLeft ('0', 3) + "  " + juce::String (p.name));
+    presetIndex = juce::jlimit (0, (int) sf->presets.size() - 1, presetIndex);
+    inst->sf2Preset = presetIndex;
+    const auto& preset = sf->presets[(size_t) presetIndex];
+    inst->name = juce::String (preset.name);
+    inst->articulations.add ("Default");
+    inst->keyswitches.push_back (-1);
+
+    // a value for a generator: the instrument zone's, else the instrument's global zone, else a default
+    auto get = [] (const Sf2Zone& z, const Sf2Zone* glob, int oper, int def)
+    {
+        if (auto* g = findGen (z, oper)) return g->amount;
+        if (glob != nullptr) if (auto* g = findGen (*glob, oper)) return g->amount;
+        return def;
+    };
+    auto range = [] (int amount) { return std::make_pair (amount & 0xff, (amount >> 8) & 0xff); };
+    const Sf2Zone* pGlobal = (! preset.zones.empty() && findGen (preset.zones[0], G_Instrument) == nullptr) ? &preset.zones[0] : nullptr;
+    int done = 0, total = 0;
+    for (auto& pz : preset.zones) if (findGen (pz, G_Instrument)) ++total;
+    bool envSet = false;
+    for (auto& pz : preset.zones)
+    {
+        const auto* ig = findGen (pz, G_Instrument);
+        if (ig == nullptr || ig->amount < 0 || ig->amount >= (int) sf->insts.size()) continue;
+        const auto& in = sf->insts[(size_t) ig->amount];
+        const Sf2Zone* iGlobal = (! in.zones.empty() && findGen (in.zones[0], G_SampleId) == nullptr) ? &in.zones[0] : nullptr;
+        // the preset zone adds to (or narrows) what the instrument says
+        auto pAdd = [&] (int oper) { if (auto* g = findGen (pz, oper)) return g->amount; if (pGlobal) if (auto* g = findGen (*pGlobal, oper)) return g->amount; return 0; };
+        const auto pKeys = range (findGen (pz, G_KeyRange) ? findGen (pz, G_KeyRange)->amount : (pGlobal && findGen (*pGlobal, G_KeyRange) ? findGen (*pGlobal, G_KeyRange)->amount : (127 << 8)));
+        const auto pVels = range (findGen (pz, G_VelRange) ? findGen (pz, G_VelRange)->amount : (pGlobal && findGen (*pGlobal, G_VelRange) ? findGen (*pGlobal, G_VelRange)->amount : (127 << 8)));
+        for (auto& iz : in.zones)
+        {
+            const auto* sg = findGen (iz, G_SampleId);
+            if (sg == nullptr || sg->amount < 0 || sg->amount >= (int) sf->samples.size()) continue;
+            const auto& h = sf->samples[(size_t) sg->amount];
+            if (h.type & 0x8000) continue;   // ROM samples: not in the file
+            const auto keys = range (get (iz, iGlobal, G_KeyRange, 127 << 8));
+            const auto vels = range (get (iz, iGlobal, G_VelRange, 127 << 8));
+            Zone z;
+            z.loKey = juce::jmax (keys.first, pKeys.first); z.hiKey = juce::jmin (keys.second, pKeys.second);
+            z.loVel = juce::jmax (1, juce::jmax (vels.first, pVels.first)); z.hiVel = juce::jmin (vels.second, pVels.second);
+            if (z.loKey > z.hiKey || z.loVel > z.hiVel) continue;
+            z.sample = sf->sample (sg->amount);
+            const int rootOverride = get (iz, iGlobal, G_RootKey, -1);
+            z.root = rootOverride >= 0 ? rootOverride : (h.root <= 127 ? h.root : 60);
+            const int scaleTune = get (iz, iGlobal, G_ScaleTune, 100);
+            z.keyTrack = scaleTune != 0;
+            z.tuneCents = (float) (100 * (get (iz, iGlobal, G_Coarse, 0) + pAdd (G_Coarse)) + get (iz, iGlobal, G_Fine, 0) + pAdd (G_Fine) + h.corr);
+            // attenuation in centibels (scaled the way most SoundFont players do, so banks sound as their makers heard them)
+            z.gainDb = -0.04f * (float) (get (iz, iGlobal, G_Atten, 0) + pAdd (G_Atten));
+            z.pan = juce::jlimit (-1.0f, 1.0f, (get (iz, iGlobal, G_Pan, 0) + pAdd (G_Pan)) / 500.0f);
+            const int len = z.sample->buffer.getNumSamples();
+            z.offset = juce::jlimit (0, len - 1, get (iz, iGlobal, G_StartOff, 0) + 32768 * get (iz, iGlobal, G_StartCoarse, 0));
+            z.end = juce::jlimit (z.offset + 1, len, len + get (iz, iGlobal, G_EndOff, 0) + 32768 * get (iz, iGlobal, G_EndCoarse, 0));
+            const int modes = get (iz, iGlobal, G_Modes, 0) & 3;
+            if (modes == 1 || modes == 3)
+            {
+                z.loopStart = h.loopStart - h.start + get (iz, iGlobal, G_LoopStartOff, 0) + 32768 * get (iz, iGlobal, G_LoopStartCoarse, 0);
+                z.loopEnd = h.loopEnd - h.start + get (iz, iGlobal, G_LoopEndOff, 0) + 32768 * get (iz, iGlobal, G_LoopEndCoarse, 0);
+                if (z.loopEnd <= z.loopStart + 4 || z.loopStart < 0 || z.loopEnd > len) z.loopStart = z.loopEnd = -1;
+            }
+            z.name = juce::String (h.name);
+            if (! envSet)
+            {
+                // the first sound's volume envelope becomes the instrument's (time in timecents, sustain as attenuation)
+                auto secs = [] (int tc) { return (float) std::pow (2.0, tc / 1200.0); };
+                inst->attack = juce::jlimit (0.0f, 3000.0f, secs (get (iz, iGlobal, G_Attack, -12000)) * 1000.0f);
+                inst->decay = juce::jlimit (5.0f, 10000.0f, secs (get (iz, iGlobal, G_Decay, -12000)) * 1000.0f);
+                if (get (iz, iGlobal, G_Decay, -12000) <= -11000) inst->decay = 10000.0f;   // no decay given: hold
+                inst->sustain = juce::jlimit (0.0f, 100.0f, 100.0f * (float) std::pow (10.0, -get (iz, iGlobal, G_Sustain, 0) / 200.0));
+                inst->release = juce::jlimit (5.0f, 8000.0f, secs (get (iz, iGlobal, G_Release, -12000)) * 1000.0f);
+                envSet = true;
+            }
+            inst->zones.push_back (z);
+        }
+        if (progress != nullptr) *progress = (float) (++done) / (float) juce::jmax (1, total);
+    }
+    if (inst->zones.empty()) { error = "That preset has no sounds."; return nullptr; }
+    std::set<std::pair<int, int>> layers;
+    std::set<const SampleData*> uniq;
+    for (auto& z : inst->zones)
+    {
+        layers.insert ({ z.loVel, z.hiVel });
+        if (uniq.insert (z.sample.get()).second) inst->bytes += (size_t) z.sample->buffer.getNumSamples() * 2 * sizeof (float);
+    }
+    inst->velocityLayers = (int) layers.size();
+    inst->samples = (int) uniq.size();
+    if (progress != nullptr) *progress = 1.0f;
+    error.clear();
+    return inst;
+}
+
+InstrumentPtr load (const juce::File& f, std::atomic<float>* progress, juce::String& error, int sf2Preset)
+{
+    if (f.hasFileExtension ("sf2")) return loadSf2 (f, sf2Preset, progress, error);
     if (f.isDirectory())
     {
         // a folder with an SFZ in it: use the SFZ
         juce::Array<juce::File> sfzs;
         for (const auto& e : juce::RangedDirectoryIterator (f, false, "*.sfz", juce::File::findFiles)) sfzs.add (e.getFile());
         if (sfzs.size() == 1) return loadSfz (sfzs[0], progress, error);
+        juce::Array<juce::File> sf2s;
+        for (const auto& e : juce::RangedDirectoryIterator (f, false, "*.sf2", juce::File::findFiles)) sf2s.add (e.getFile());
+        if (sf2s.size() == 1) return loadSf2 (sf2s[0], sf2Preset, progress, error);
         return loadFolder (f, progress, error);
     }
     if (f.hasFileExtension ("sfz")) return loadSfz (f, progress, error);
@@ -661,11 +914,12 @@ public:
     }
 
     // ---- loading ----
-    bool startLoading (const juce::File& f)
+    bool startLoading (const juce::File& f, int sf2Preset = 0)
     {
         if (! f.exists()) return false;
         stopThread (10000);
         pending = f;
+        pendingPreset = sf2Preset;
         progress = 0;
         loadError.clear();
         loading = true;
@@ -698,6 +952,7 @@ public:
         auto i = getInstrument();
         const auto src = i != nullptr ? i->source.getFullPathName() : (isLoading() ? pending.getFullPathName() : juce::String());
         state.state.setProperty ("source", src, nullptr);
+        state.state.setProperty ("sf2preset", i != nullptr ? i->sf2Preset : pendingPreset, nullptr);
         BuiltinFx::getStateInformation (mb);
     }
     void setStateInformation (const void* d, int size) override
@@ -707,7 +962,7 @@ public:
         if (f.getFullPathName().isNotEmpty() && f.exists())
         {
             restoring = true;   // keep the saved knob settings, not the SFZ's
-            startLoading (f);
+            startLoading (f, (int) state.state.getProperty ("sf2preset", 0));
         }
     }
 
@@ -783,7 +1038,7 @@ public:
                 v.pos += v.step;
                 if (filterOn) { v.lpL += lpK * (a - v.lpL); v.lpR += lpK * (b - v.lpR); a = v.lpL; b = v.lpR; }
                 const float g = v.env * v.gain * v.fade;
-                outL += a * g; outR += b * g;
+                outL += a * g * v.panL; outR += b * g * v.panR;
             }
             L[i] = outL * gain;
             R[i] = outR * gain;
@@ -811,7 +1066,7 @@ private:
         int note = 60;
         const Zone* zone = nullptr;
         double pos = 0, step = 1;
-        float env = 0, gain = 1, fade = 1, fadeStep = 0, vel = 1, lpL = 0, lpR = 0;
+        float env = 0, gain = 1, fade = 1, fadeStep = 0, vel = 1, lpL = 0, lpR = 0, panL = 1, panR = 1;
         bool pedalHeld = false;
         juce::int64 age = 0;
     };
@@ -825,6 +1080,7 @@ private:
     juce::int64 counter = 0;
     juce::Random rnd;
     juce::File pending;
+    int pendingPreset = 0;
     std::atomic<bool> loading { false };
     std::atomic<float> progress { 0 };
     juce::String loadError;
@@ -838,16 +1094,16 @@ private:
     }
 
     // libraries already in memory (two tracks with the same violin share one copy)
-    static InstrumentPtr cached (const juce::File& f, std::atomic<float>* prog, juce::String& err)
+    static InstrumentPtr cached (const juce::File& f, int preset, std::atomic<float>* prog, juce::String& err)
     {
         static std::mutex m;
         static std::map<juce::String, std::weak_ptr<const Instrument>> cache;
-        const auto key = f.getFullPathName() + "|" + juce::String (f.getLastModificationTime().toMilliseconds());
+        const auto key = f.getFullPathName() + "|" + juce::String (f.getLastModificationTime().toMilliseconds()) + "|" + juce::String (preset);
         {
             const std::lock_guard<std::mutex> g (m);
             if (auto it = cache.find (key); it != cache.end()) if (auto p = it->second.lock()) { if (prog) *prog = 1.0f; return p; }
         }
-        auto p = msamp::load (f, prog, err);
+        auto p = msamp::load (f, prog, err, preset);
         if (p != nullptr) { const std::lock_guard<std::mutex> g (m); cache[key] = p; }
         return p;
     }
@@ -856,7 +1112,7 @@ private:
     {
         juce::String err;
         auto f = pending;
-        auto result = cached (f, &progress, err);
+        auto result = cached (f, pendingPreset, &progress, err);
         if (threadShouldExit()) { loading = false; return; }
         if (result != nullptr)
         {
@@ -939,6 +1195,7 @@ private:
             v->step = z->sample->rate / currentSampleRate * std::pow (2.0, semis / 12.0);
             v->gain = velGain * juce::Decibels::decibelsToGain (z->gainDb) * (releaseTrigger ? juce::Decibels::decibelsToGain (param ("relvol")) : 1.0f);
             if (stolen) { v->fade = 0; v->fadeStep = (float) (1.0 / (0.002 * currentSampleRate)); }
+            v->panL = juce::jmin (1.0f, 1.0f - z->pan); v->panR = juce::jmin (1.0f, 1.0f + z->pan);
             if (releaseTrigger) { v->attacking = false; v->env = 1.0f; }
         }
     }
@@ -993,7 +1250,15 @@ public:
             b->setColour (juce::TextButton::textColourOffId, look.s.text);
         }
         loadFolder.setTooltip ("A folder of sounds named by note (\"Cello A2 mf RR1\"), or a sample library's folder");
-        loadFile.setTooltip ("An SFZ instrument, a Kontakt library's .nki (its sounds are mapped by name), or a single sound");
+        loadFile.setTooltip ("An SFZ or SoundFont (.sf2) instrument, a Kontakt library's .nki (its sounds are mapped by name), or a single sound");
+        presetBox.setTextWhenNothingSelected ("SoundFont preset");
+        presetBox.onChange = [this]
+        {
+            auto in = fx.getInstrument();
+            const int idx = presetBox.getSelectedItemIndex();
+            if (in != nullptr && idx >= 0 && idx != in->sf2Preset) fx.startLoading (in->source, idx);
+        };
+        addChildComponent (presetBox);
         loadFolder.onClick = [this]
         {
             chooser = std::make_unique<juce::FileChooser> ("Choose a folder of sounds", juce::File::getSpecialLocation (juce::File::userMusicDirectory));
@@ -1003,7 +1268,7 @@ public:
         loadFile.onClick = [this]
         {
             chooser = std::make_unique<juce::FileChooser> ("Choose an instrument or a sound", juce::File::getSpecialLocation (juce::File::userMusicDirectory),
-                                                           "*.sfz;*.nki;*.wav;*.aif;*.aiff;*.flac;*.ogg;*.mp3;*.ncw");
+                                                           "*.sfz;*.sf2;*.nki;*.wav;*.aif;*.aiff;*.flac;*.ogg;*.mp3;*.ncw");
             chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
                                   [this] (const juce::FileChooser& fc) { if (fc.getResult().existsAsFile()) startLoad (fc.getResult()); });
         };
@@ -1045,7 +1310,7 @@ public:
             s << in->samples << " sounds  /  " << in->articulations.size() << (in->articulations.size() == 1 ? " articulation  /  " : " articulations  /  ")
               << in->velocityLayers << (in->velocityLayers == 1 ? " layer" : " layers");
             if (in->roundRobins > 1) s << "  /  " << in->roundRobins << " round robins";
-            s << "  /  " << juce::String ((double) in->bytes / (1024.0 * 1024.0), 0) << " MB";
+            s << "  /  " << juce::String (juce::jmax (1, juce::roundToInt ((double) in->bytes / (1024.0 * 1024.0)))) << " MB";
             g.drawText (s, info.removeFromTop (16), juce::Justification::centredLeft);
             if (in->octaveCorrection != 0)
             {
@@ -1068,6 +1333,8 @@ public:
         {
             g.drawText ("ARTICULATION  (OR PLAY A KEYSWITCH)", articArea.translated (0, -14).withHeight (12), juce::Justification::left);
         }
+        else if (in != nullptr && ! in->sf2Presets.isEmpty())
+            g.drawText ("SOUNDFONT PRESET  (" + juce::String (in->sf2Presets.size()) + ")", articArea.translated (0, -14).withHeight (12), juce::Justification::left);
 
         if (fx.isLoading())
         {
@@ -1132,7 +1399,8 @@ private:
     MultiSamplerFx& fx;
     Switch rrMode;
     juce::OwnedArray<Knob> knobs;
-    juce::TextButton loadFolder { "Load folder..." }, loadFile { "Load SFZ / file..." };
+    juce::TextButton loadFolder { "Load folder..." }, loadFile { "Load SFZ / SF2 / file..." };
+    juce::ComboBox presetBox;
     juce::OwnedArray<juce::TextButton> articButtons;
     std::unique_ptr<juce::FileChooser> chooser;
     juce::Rectangle<int> infoArea, articArea, mapArea, keysArea, rrArea;
@@ -1282,6 +1550,7 @@ private:
     void layoutArticButtons()
     {
         auto r = articArea;
+        if (presetBox.isVisible()) { presetBox.setBounds (r.removeFromLeft (360)); r.removeFromLeft (10); }
         for (auto* b : articButtons)
         {
             const int w = juce::jmin (180, juce::jmax (90, juce::roundToInt (juce::GlyphArrangement::getStringWidth (theme::font (12.0f, true), b->getButtonText())) + 30));
@@ -1300,6 +1569,14 @@ private:
         {
             shownFor = in.get();
             articButtons.clear();
+            presetBox.setVisible (in != nullptr && ! in->sf2Presets.isEmpty());
+            if (presetBox.isVisible())
+            {
+                presetBox.clear (juce::dontSendNotification);
+                presetBox.addItemList (in->sf2Presets, 1);
+                presetBox.setSelectedItemIndex (in->sf2Preset, juce::dontSendNotification);
+                presetBox.sendLookAndFeelChange();
+            }
             if (in != nullptr && in->articulations.size() > 1)
                 for (int a = 0; a < in->articulations.size(); ++a)
                 {
@@ -1326,14 +1603,14 @@ private:
 juce::AudioProcessorEditor* MultiSamplerFx::createEditor() { return new MultiSamplerEditor (*this); }
 
 std::unique_ptr<BuiltinFx> createMultiSampler() { return std::make_unique<MultiSamplerFx>(); }
-bool multiSamplerLoad (juce::AudioProcessor* p, const juce::File& f) { if (auto* m = dynamic_cast<MultiSamplerFx*> (p)) return m->startLoading (f); return false; }
+bool multiSamplerLoad (juce::AudioProcessor* p, const juce::File& f, int preset) { if (auto* m = dynamic_cast<MultiSamplerFx*> (p)) return m->startLoading (f, preset); return false; }
 bool multiSamplerIsLoading (juce::AudioProcessor* p) { if (auto* m = dynamic_cast<MultiSamplerFx*> (p)) return m->isLoading(); return false; }
 InstrumentPtr multiSamplerInstrument (juce::AudioProcessor* p) { if (auto* m = dynamic_cast<MultiSamplerFx*> (p)) return m->getInstrument(); return nullptr; }
-bool multiSamplerLoadNow (juce::AudioProcessor* p, const juce::File& f, juce::String& error)
+bool multiSamplerLoadNow (juce::AudioProcessor* p, const juce::File& f, juce::String& error, int preset)
 {
     auto* m = dynamic_cast<MultiSamplerFx*> (p);
     if (m == nullptr) return false;
-    auto in = msamp::load (f, nullptr, error);
+    auto in = msamp::load (f, nullptr, error, preset);
     if (in == nullptr) return false;
     m->setInstrument (in);
     return true;

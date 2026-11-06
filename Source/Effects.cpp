@@ -622,14 +622,17 @@ const std::vector<BuiltinFxInfo>& getBuiltinFxList()
         { "compressor", "Compressor",  "Even out dynamics and add punch", "Dynamics" },
         { "buscomp",    "Bus Compressor", "Glue a mix or a group together", "Dynamics" },
         { "limiter",    "Limiter",     "A loudness ceiling that nothing gets past", "Dynamics" },
+        { "multiband",  "Multiband Compressor", "Three bands, each with its own compressor", "Dynamics" },
         { "punch",      "Punch",       "Transient shaper and HDR enhancer: more snap, more detail", "Dynamics" },
         { "noisegate",  "Noise Gate",  "Silence hiss and bleed between phrases", "Dynamics" },
         { "deesser",    "De-esser",    "Tame harsh S and T sounds", "Vocal" },
         { "autotune",   "Auto-Tune",   "Live pitch correction to a key and scale", "Vocal" },
         { "voiceclean", "Voice Cleaner", "Reduce background noise and room reverb", "Vocal" },
+        { "vocalremove", "Vocal Remover", "Take out (or keep only) what's in the centre of a mix", "Vocal" },
         { "reverb",     "Reverb",      "Put the sound in a room or hall", "Space" },
         { "delay",      "Delay",       "Tempo-synced echoes, with ping-pong", "Space" },
         { "dubdelay",   "Dub Delay",   "Tape echo that can run away into feedback", "Space" },
+        { "shimmer",    "Shimmer Reverb", "A big space with octaves rising inside it", "Space" },
         { "widener",    "Stereo Widener", "Wider stereo that still sums to mono cleanly", "Space" },
         { "chorus",     "Chorus",      "Thicken and widen", "Modulation" },
         { "phaser",     "Phaser",      "Sweeping, swirling notches", "Modulation" },
@@ -638,7 +641,9 @@ const std::vector<BuiltinFxInfo>& getBuiltinFxList()
         { "gater",      "Gater",       "Rhythmic tempo-synced volume chopping", "Modulation" },
         { "amp",        "Amp",         "Guitar / bass amp with three channels and cabinets", "Character" },
         { "bitcrusher", "Bit Crusher", "Fewer bits, lower sample rate: lo-fi grit", "Character" },
-        { "subbass",    "Sub Bass",    "Adds a sub an octave below the bass", "Character" } };
+        { "subbass",    "Sub Bass",    "Adds a sub an octave below the bass", "Character" },
+        { "tuner",      "Tuner",       "The note you're playing and how far off it is", "Utility" },
+        { "analyzer",   "Spectrum Analyser", "Every frequency, live", "Utility" } };
     return list;
 }
 
@@ -655,6 +660,14 @@ std::unique_ptr<BuiltinFx> createBuiltinFx (const juce::String& id)
     if (id == "vocoder")    return createVocoder();
     if (id == "sampler")    return createSampler();
     if (id == "multisampler") return createMultiSampler();
+    if (id == "organ")      return createOrgan();
+    if (id == "multiband")  return createMultiband();
+    if (id == "shimmer")    return createShimmer();
+    if (id == "tuner")      return createTuner();
+    if (id == "analyzer")   return createAnalyzer();
+    if (id == "vocalremove") return createVocalRemover();
+    if (id == "epiano")     return createEPiano();
+    if (id == "acid")       return createAcidBass();
     if (id == "compressor") return std::make_unique<CompressorFx>();
     if (id == "reverb")     return std::make_unique<ReverbFx>();
     if (id == "delay")      return std::make_unique<DelayFx>();

@@ -972,6 +972,7 @@ juce::AudioProcessorEditor* createFaceplate (BuiltinFx& fx)
 {
     if (auto* e = createFaceplate2 (fx)) return e;
     if (auto* e = createFaceplate3 (fx)) return e;
+    if (auto* e = createFaceplate4 (fx)) return e;
     const auto id = fx.getFxId();
     if (id == "eq")         return new EqFace (fx);
     if (id == "tubeeq")     return new TubeEqFace (fx);

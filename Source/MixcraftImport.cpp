@@ -1,4 +1,6 @@
 #include "MixcraftImport.h"
+#include "Effects.h"
+#include <optional>
 
 namespace rs
 {
@@ -81,6 +83,31 @@ namespace
         if (has ({ "pluck", "guzheng", "harp", "guitar", "koto" })) return 2;   // Pluck
         if (has ({ "square", "chip", "8bit" }))                return 5;   // Square Keys
         return 0;                                                          // Saw Lead
+    }
+
+    // Mixcraft's bundled instruments, played by their RENASOUND counterparts (set up to match)
+    struct Counterpart { juce::String type; std::vector<std::pair<const char*, float>> params; };
+    std::optional<Counterpart> counterpartFor (const juce::String& instrument)
+    {
+        const auto s = instrument.toLowerCase();
+        auto has = [&s] (std::initializer_list<const char*> words) { for (auto* w : words) if (s.contains (w)) return true; return false; };
+        if (has ({ "combo organ model f" }))            return Counterpart { "organ", { { "model", 1.0f }, { "rotary", 0.0f }, { "perc", 0.0f } } };
+        if (has ({ "combo organ model v", "combo organ" })) return Counterpart { "organ", { { "model", 2.0f }, { "rotary", 0.0f }, { "perc", 0.0f } } };
+        if (has ({ "vb3", "b3 organ", "tonewheel", "hammond" })) return Counterpart { "organ", {} };
+        if (has ({ "wurli", "reed piano" }))            return Counterpart { "epiano", { { "model", 1.0f } } };
+        if (has ({ "lounge lizard", "rhodes", "electric piano", "e-piano", "epiano" })) return Counterpart { "epiano", {} };
+        if (has ({ "alien 303", "303", "acid" }))       return Counterpart { "acid", { { "seq", 0.0f } } };   // the track's own notes play it
+        if (has ({ "organ" }))                          return Counterpart { "organ", {} };
+        return std::nullopt;
+    }
+    juce::String counterpartState (const Counterpart& c)
+    {
+        auto fx = rs::createBuiltinFx (c.type);
+        if (fx == nullptr) return {};
+        for (auto& [id, v] : c.params) if (auto* p = fx->state.getParameter (id)) p->setValueNotifyingHost (p->convertTo0to1 (v));
+        juce::MemoryBlock mb;
+        fx->getStateInformation (mb);
+        return mb.toBase64Encoding();
     }
 
     std::vector<NoteIn> notesFromEvents (const Reader& r, const Chunk& c)
@@ -290,7 +317,15 @@ MixcraftImport importMixcraftProject (const juce::File& projectFile, const juce:
         te->setAttribute ("pan", t.pan);
         te->setAttribute ("mute", t.mute);
         if (t.midi) te->setAttribute ("preset", presetFor (t.instrument));
-        if (t.midi
+        const auto counterpart = t.midi ? counterpartFor (t.instrument) : std::nullopt;
+        if (counterpart)
+        {
+            auto* ie = te->createNewChildElement ("INSTRUMENT");
+            ie->setAttribute ("type", "builtin:" + counterpart->type);
+            ie->setAttribute ("bypass", false);
+            ie->setAttribute ("state", counterpartState (*counterpart));
+        }
+        else if (t.midi
             && ((t.instrument + " " + t.name).containsIgnoreCase ("drum") || (t.instrument + " " + t.name).containsIgnoreCase ("kit")
                 || (t.instrument + " " + t.name).containsIgnoreCase ("perc") || (t.instrument + " " + t.name).containsIgnoreCase ("beat")))
         {
@@ -379,6 +414,12 @@ MixcraftImport importMixcraftProject (const juce::File& projectFile, const juce:
     result.summary = juce::String (result.numTracks) + " tracks, " + juce::String (result.numAudioClips) + " audio clips, "
                    + juce::String (result.numMidiClips) + " MIDI clips at " + (std::abs (bpm - std::round (bpm)) < 0.001 ? juce::String (juce::roundToInt (bpm)) : juce::String (bpm, 2)) + " BPM";
     return result;
+}
+
+juce::String mixcraftCounterpart (const juce::String& name)
+{
+    const auto c = counterpartFor (name);
+    return c ? c->type : juce::String();
 }
 
 } // namespace rs

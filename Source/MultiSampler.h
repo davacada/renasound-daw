@@ -34,6 +34,7 @@ struct Zone
     bool release = false;    // plays when the key is let go
     bool keyTrack = true;    // false: the same pitch on every key (drums)
     float tuneCents = 0, gainDb = 0;
+    float pan = 0;                         // -1 left .. +1 right (SoundFont stereo pairs)
     int offset = 0, end = -1;              // in samples
     int loopStart = -1, loopEnd = -1;      // -1 = no loop
     bool oneShot = false;                  // plays to the end, ignores note-off
@@ -49,6 +50,8 @@ struct Instrument
     std::vector<int> keyswitches;          // a key per articulation (-1 = none)
     int velocityLayers = 0, roundRobins = 0, samples = 0;
     int octaveCorrection = 0;              // how many octaves the file names were off (found by listening)
+    juce::StringArray sf2Presets;          // a SoundFont: all its presets ("000:000 Grand Piano"), and which one this is
+    int sf2Preset = -1;
     size_t bytes = 0;
     // envelope found in the SFZ (ms, %): applied once on load, < 0 = not given
     float attack = -1, decay = -1, sustain = -1, release = -1;
@@ -60,7 +63,8 @@ SamplePtr loadSample (const juce::File& f, juce::AudioFormatManager& formats, ju
 InstrumentPtr mapFiles (const juce::Array<juce::File>& files, const juce::File& source, std::atomic<float>* progress, juce::String& error);
 InstrumentPtr loadFolder (const juce::File& folder, std::atomic<float>* progress, juce::String& error);
 InstrumentPtr loadSfz (const juce::File& sfz, std::atomic<float>* progress, juce::String& error);
-InstrumentPtr load (const juce::File& fileOrFolder, std::atomic<float>* progress, juce::String& error);
+InstrumentPtr loadSf2 (const juce::File& sf2, int presetIndex, std::atomic<float>* progress, juce::String& error);
+InstrumentPtr load (const juce::File& fileOrFolder, std::atomic<float>* progress, juce::String& error, int sf2Preset = 0);
 
 // what a file name says about a sample (for the mapper, and for tests)
 struct NameInfo
@@ -80,9 +84,9 @@ double detectPitchHz (const juce::AudioBuffer<float>& b, double rate);
 namespace rs
 {
 std::unique_ptr<BuiltinFx> createMultiSampler();
-bool multiSamplerLoad (juce::AudioProcessor*, const juce::File&);   // starts loading in the background
+bool multiSamplerLoad (juce::AudioProcessor*, const juce::File&, int sf2Preset = 0);   // starts loading in the background
 bool multiSamplerIsLoading (juce::AudioProcessor*);
 msamp::InstrumentPtr multiSamplerInstrument (juce::AudioProcessor*);
-bool multiSamplerLoadNow (juce::AudioProcessor*, const juce::File&, juce::String& error);   // on this thread (tests)
+bool multiSamplerLoadNow (juce::AudioProcessor*, const juce::File&, juce::String& error, int sf2Preset = 0);   // on this thread (tests)
 std::vector<int> multiSamplerSoundingZones (juce::AudioProcessor*);                      // zone numbers playing now
 }
