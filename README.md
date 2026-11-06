@@ -6,6 +6,10 @@ A Mixcraft-style music DAW for **macOS and Windows**, written in C++ with JUCE.
 
 ![RENASOUND](docs/screenshot.png)
 
+## What's new in 0.14.1
+
+- Fixed: closing a device's window and opening it again showed a plain list of controls instead of its panel (instruments, effects and plugins).
+
 ## What's new in 0.14
 
 - **Three new instruments**, each with its own live panel:

@@ -413,7 +413,14 @@ public:
         editor->setTopLeftPosition (0, barHeight());
     }
 
-    ~Content() override { presets.reset(); editor.reset(); }   // editor goes before its processor
+    ~Content() override
+    {
+        presets.reset();
+        // the processor must be told its editor is going, or it keeps thinking one is open
+        // (and the next window would only get the plain list of controls)
+        if (auto* ed = dynamic_cast<juce::AudioProcessorEditor*> (editor.get())) ed->processor.editorBeingDeleted (ed);
+        editor.reset();   // editor goes before its processor
+    }   // editor goes before its processor
 
     void childBoundsChanged (juce::Component* c) override
     {
